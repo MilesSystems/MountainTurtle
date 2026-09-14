@@ -64,7 +64,7 @@ directory tree.
 
 ## Photo browser and drive controls
 
-All 98 service, badge, and photo-browser tests passed. The updated native app,
+All 99 service, badge, and photo-browser tests passed. The updated native app,
 Finder extension, and sidebar helper built successfully. The installed app is
 now signed with the Mac's existing Apple Development identity; deep and strict
 signature verification passed. This is still a local development build, not a
@@ -102,12 +102,25 @@ the new signature has access. The helper now waits nonblockingly for up to 60
 seconds and reports actionable permission guidance while leaving the volume
 connected.
 
-The newly signed Finder extension also waits for macOS to approve access to its
-existing sandbox container. Its toolbar actions have been implemented, but the
-final signed build's live menu dispatch and automatic sidebar restoration are
-not yet verified. The computer-use tool rejects access to macOS's permission
-prompt application; the user has been asked to approve the normal prompts.
-No TCC database or sandbox permission was modified to bypass these checks.
+After the user approved the prompts, the Finder extension loaded normally.
+Re-enabling it in macOS settings and adding its toolbar item produced the Turtle
+dropdown in the actual Nikki volume window. Its **Cache settings** action opened
+the correct Nikki settings sheet, with the existing 164.4 MB / 88-file cache
+shown. Extension and app logs confirm the action was delivered end to end.
+
+Finder's native **Eject** shortcut removed the real Nikki volume. The service
+then reported `mounted: false`, `desiredConnected: false`, and `disconnected`;
+it did not immediately remount an intentionally ejected drive. Nikki was then
+reconnected from the app.
+Status now also suppresses stale sidebar warnings as soon as the kernel mount
+disappears; a regression test covers that ejection interval.
+
+The user's Network Volumes approval at 10:09:52 answered an old ad hoc build's
+queued request. TCC logs show the signed update issued its current request at
+10:11:14; automatic sidebar restoration still awaits that approval. The
+computer-use tool rejects access to macOS's permission-prompt application; the
+user has been asked to approve the current prompt. No TCC database or sandbox
+permission was modified to bypass these checks.
 
 ## Pending or not tested
 

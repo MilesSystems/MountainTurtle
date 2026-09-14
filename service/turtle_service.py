@@ -538,6 +538,8 @@ class Supervisor:
                 self.revisions[identity] = connection.get("revision", 0)
             path = str(self.paths.mounts / connection["name"])
             mounted = path in mounts
+            if not mounted:
+                self.sidebar_results.pop(identity, None)
             child = self.children.get(identity)
             ejecting = self.ejections.get(identity)
             if child and mounted:
@@ -706,7 +708,9 @@ def status(paths):
                     message=live.get("message", "") if running else "", mountPath=str(paths.mounts / connection["name"]),
                     updatedAt=live.get("updatedAt", connection.get("updatedAt", 0)))
         item["mounted"] = item["mountPath"] in mounted
-        if running:
+        # Finder can eject between supervisor ticks. Only describe sidebar state
+        # for a volume that is still present in the current kernel mount table.
+        if running and item["mounted"]:
             item.update({key: live[key] for key in ("sidebarItemID", "sidebarError") if key in live})
         if item["mountPath"] in mounted and item["state"] == "disconnected":
             item.update(state="connected", message="Drive remains attached; connect to resume supervision.")

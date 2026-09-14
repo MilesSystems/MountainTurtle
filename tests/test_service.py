@@ -567,10 +567,28 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("not-a-real-token", json.dumps(result))
         self.assertNotIn("pid", result["connections"][0])
 
+    def test_sidebar_status_disappears_immediately_when_kernel_mount_is_gone(self):
+        turtle.write_json(self.paths.base / "runtime.json", {"connections": {
+            self.connection["id"]: {"state": "needsLogin", "sidebarItemID": 42,
+                                      "sidebarError": "Sidebar permission needed; drive stays connected."}}})
+        with patch.object(turtle, "service_running", return_value=True), \
+             patch.object(turtle, "mount_table", return_value={str(self.paths.mounts / self.connection["name"])}) as mounts, \
+             patch.object(turtle, "dependencies", return_value={}):
+            attached = turtle.status(self.paths)["connections"][0]
+            self.assertEqual(attached["sidebarItemID"], 42)
+            self.assertIn("permission needed", attached["sidebarError"])
+            # The supervisor has not rewritten runtime.json yet after Finder eject.
+            mounts.return_value = set()
+            detached = turtle.status(self.paths)["connections"][0]
+        self.assertFalse(detached["mounted"])
+        self.assertNotIn("sidebarError", detached)
+        self.assertNotIn("sidebarItemID", detached)
+
     def test_finder_eject_stays_disconnected_even_with_autoconnect(self):
         with self.store.update() as state:
             state["connections"][0]["desiredConnected"] = True
         supervisor, process = turtle.Supervisor(self.paths), Mock()
+        supervisor.sidebar_results[self.connection["id"]] = {"sidebarError": "An old sidebar error", "sidebarItemID": 42}
         process.pid, process.poll.return_value = 12345, 0
         supervisor.children[self.connection["id"]] = {"process": process, "started": time.time(), "seenMounted": True}
         with patch.object(turtle, "mount_table", return_value=set()), patch.object(supervisor, "start_mount") as start:
@@ -578,6 +596,8 @@ class ServiceTests(unittest.TestCase):
         start.assert_not_called()
         self.assertFalse(self.store.read()["connections"][0]["desiredConnected"])
         self.assertTrue(self.store.read()["connections"][0]["autoConnect"])
+        self.assertNotIn(self.connection["id"], supervisor.sidebar_results)
+        self.assertNotIn("sidebarError", supervisor.runtime[self.connection["id"]])
 
     def test_disconnect_starts_supervision_for_an_orphan_mount(self):
         with patch.object(turtle, "mount_table", return_value={str(self.paths.mounts / self.connection["name"])}), \
