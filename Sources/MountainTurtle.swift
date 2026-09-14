@@ -129,6 +129,7 @@ enum ServiceClient {
     @Published var launchAtLogin = false
     @Published var isLoading = true
     @Published var activeAction: String?
+    @Published var loginMessage: String?
     @Published var error: String?
     @Published var serviceError: String?
     private var refreshing = false
@@ -167,6 +168,7 @@ enum ServiceClient {
     @discardableResult func action(_ args: [String]) async -> Bool {
         guard activeAction == nil else { return false }
         activeAction = args.first
+        loginMessage = nil
         defer { activeAction = nil }
         do {
             let data = try await ServiceClient.run(args)
@@ -174,6 +176,7 @@ enum ServiceClient {
             guard response.ok else { throw TurtleError(message: response.error ?? "The action could not be completed.") }
             if let id = response.id { selectedID = id }
             await refresh()
+            if args.first == "login" { loginMessage = "AWS sign-in completed." }
             return true
         } catch {
             self.error = error.localizedDescription
@@ -366,6 +369,7 @@ struct MainView: View {
                     if connection.isConnected {
                         Button { model.openFinder(connection) } label: { Label("Show in Finder", systemImage: "folder") }.buttonStyle(.borderedProminent)
                         Button { Task { await model.action(["disconnect", connection.id]) } } label: { Label("Eject", systemImage: "eject") }
+                        Button("Sign in to AWS") { Task { await model.action(["login", connection.id]) } }
                     } else if connection.state == "needsLogin" {
                         Button { Task { await model.action(["login", connection.id]) } } label: { Label("Sign in to AWS", systemImage: "person.badge.key") }.buttonStyle(.borderedProminent)
                         Button("Try connecting again") { Task { await model.action(["connect", connection.id]) } }
@@ -381,8 +385,11 @@ struct MainView: View {
                 if model.activeAction == "login" {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
-                        Text("Finish signing in in your browser. This connection will update when you return.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text("Approve the request on the AWS page within five minutes. Mountain Turtle will confirm when sign-in finishes.").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
+                }
+                if let message = model.loginMessage {
+                    notice(message, symbol: "checkmark.circle", color: moss)
                 }
                 VStack(spacing: 0) {
                     infoRow("S3 bucket", connection.bucket, symbol: "shippingbox")

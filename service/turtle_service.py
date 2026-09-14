@@ -220,17 +220,18 @@ def mount_command(connection, paths, rclone, remote):
 
 def tail_error(connection, paths):
     path = paths.logs / (connection["id"] + ".log")
+    cutoff = max(connection.get("lastLoginAt", 0), connection.get("lastMountAt", 0))
     try:
-        if path.stat().st_mtime < connection.get("lastLoginAt", 0):
+        if path.stat().st_mtime < cutoff:
             return ""
         with path.open("rb") as handle:
             handle.seek(max(0, path.stat().st_size - 4096))
             lines = handle.read().decode(errors="replace").splitlines()
         for line in reversed(lines):
-            if connection.get("lastLoginAt"):
+            if cutoff:
                 try:
                     stamp = time.mktime(time.strptime(line[:19], "%Y/%m/%d %H:%M:%S"))
-                    if stamp < int(connection["lastLoginAt"]):
+                    if stamp < int(cutoff):
                         continue
                 except ValueError:
                     continue
@@ -335,11 +336,15 @@ class Supervisor:
             config_path.write_text(config)
             config_path.chmod(0o600)
             (self.paths.cache / identity).mkdir(parents=True, exist_ok=True, mode=0o700)
+            started = time.time()
             with (self.paths.logs / (identity + ".log")).open("ab", buffering=0) as error_log:
                 process = subprocess.Popen(mount_command(connection, self.paths, deps["rclone"], remote),
                                            env=environment(connection["profile"], self.paths),
                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error_log)
-            self.children[identity] = {"process": process, "started": time.time(), "seenMounted": False}
+            # Logs span reconnects; keep errors from an earlier process out of
+            # the new connection's status, including after supervisor recovery.
+            current["lastMountAt"] = connection["lastMountAt"] = started
+            self.children[identity] = {"process": process, "started": started, "seenMounted": False}
             self.record(connection, "connecting", "Connecting to S3…", process.pid)
             self.publish()
 
@@ -580,12 +585,14 @@ def action(args, paths):
         if not aws:
             raise ValueError("Install the AWS command-line tools to sign in")
         try:
-            result = subprocess.run([aws, "sso", "login", "--profile", connection["profile"]],
+            # Device authorization finishes on AWS's page, without a temporary
+            # localhost callback that stops working when a browser tab is revisited.
+            result = subprocess.run([aws, "sso", "login", "--use-device-code", "--profile", connection["profile"]],
                                     env=environment(connection["profile"], paths), capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
-            raise ValueError("AWS sign-in timed out after five minutes. Choose Sign In to try again.")
+            raise ValueError("AWS sign-in timed out after five minutes. Close the previous sign-in tab, then choose Sign in to AWS to start a fresh request.")
         if result.returncode:
-            raise ValueError("AWS sign-in did not complete. Check this profile's SSO configuration and try again.")
+            raise ValueError("AWS sign-in did not complete. Close the previous sign-in tab, then choose Sign in to AWS to start a fresh request. If it fails again, check this profile's SSO configuration.")
         with store.update() as state:
             connection = find_connection(state, args.id)
             connection["lastLoginAt"] = time.time()

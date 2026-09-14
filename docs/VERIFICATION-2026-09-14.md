@@ -24,6 +24,25 @@ they are more than an app status or a displayed drive icon. The LaunchAgent
 restart exercised the registered startup path and automatic drive restoration.
 It did not exercise an actual reboot or macOS logout/login.
 
+## Morning sign-in recovery
+
+The AWS session had expired while the network volume remained mounted. The
+reported browser page was a localhost OAuth callback with no listener. The
+screenshot alone could also describe a previously completed callback being
+reopened; a separate AWS identity check confirmed expired authentication here.
+
+The updated app uses AWS device authorization and exposes **Sign in to AWS**
+while connected. A live request launched from that button completed on the AWS
+portal, followed by **AWS sign-in completed** in Mountain Turtle. A fresh AWS
+identity request and S3 photo metadata request succeeded. The existing mount
+needed an Eject/Connect cycle to refresh stale folder information; afterward a
+4,096-byte read through the mount had a valid JPEG signature. No cloud writes
+were performed.
+
+All 26 service tests passed after the sign-in fix, including failed/expired
+sign-in state preservation and suppression of errors from previous mount
+attempts. Current-attempt errors remain visible.
+
 ## Pending or not tested
 
 - Reconnect after an actual reboot or logout/login was not tested.

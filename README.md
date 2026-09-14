@@ -75,8 +75,13 @@ Custom volume artwork is provided locally; it does not require uploading an icon
 to your bucket.
 
 Startup happens after you sign in to macOS. It cannot bypass an expired AWS SSO
-session: use the app's sign-in action or `aws sso login --profile PROFILE` when
-renewal is required. Credentials remain under the AWS tools' management;
+session: use **Sign in to AWS** or
+`aws sso login --use-device-code --profile PROFILE` when renewal is required.
+The app uses AWS device authorization: approve the request on the AWS page and
+wait for Mountain Turtle to confirm completion. This flow does not redirect to a
+temporary localhost callback. If sign-in times out after five minutes, close the
+previous sign-in tab and choose **Sign in to AWS** to start a fresh request.
+Credentials remain under the AWS tools' management;
 Mountain Turtle saves connection settings rather than AWS access keys.
 
 ## Files, caching, and disconnecting

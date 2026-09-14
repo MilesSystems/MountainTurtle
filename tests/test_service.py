@@ -150,6 +150,47 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("--vfs-refresh", command)
         self.assertNotIn("--vfs-used-is-size", command)
 
+    def test_new_mount_records_error_cutoff_without_changing_connection_intent(self):
+        with self.store.update() as state:
+            state["connections"][0]["desiredConnected"] = True
+        connection = dict(self.store.read()["connections"][0])
+        before = dict(connection)
+        started = 1789370400.5
+        process = Mock(pid=12345)
+        supervisor = turtle.Supervisor(self.paths)
+        with patch.object(turtle, "dependencies", return_value={"rclone": "/rclone"}), \
+             patch.object(turtle.subprocess, "Popen", return_value=process), \
+             patch.object(turtle.time, "time", return_value=started):
+            supervisor.start_mount(connection)
+        expected = dict(before, lastMountAt=started)
+        self.assertEqual(self.store.read()["connections"][0], expected)
+        self.assertEqual(connection, expected)
+        self.assertEqual(supervisor.children[connection["id"]]["started"], started)
+
+    def test_tail_error_ignores_errors_before_latest_mount_or_login(self):
+        now = int(time.time())
+        path = self.paths.logs / (self.connection["id"] + ".log")
+        old_stamp = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now - 30))
+        recent_stamp = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now))
+        path.write_text(f"{old_stamp} ERROR : previous mount failed\n"
+                        f"{old_stamp} ERROR : ExpiredToken\n"
+                        f"{recent_stamp} NOTICE : current mount ready\n")
+        for last_login, last_mount in ((now - 60, now - 10), (now - 10, now - 60)):
+            with self.subTest(lastLoginAt=last_login, lastMountAt=last_mount):
+                connection = dict(self.connection, lastLoginAt=last_login, lastMountAt=last_mount)
+                self.assertEqual(turtle.tail_error(connection, self.paths), "")
+
+    def test_tail_error_retains_errors_from_current_mount(self):
+        now = int(time.time())
+        path = self.paths.logs / (self.connection["id"] + ".log")
+        stamp = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now))
+        connection = dict(self.connection, lastLoginAt=now - 60, lastMountAt=now)
+        for text, expected in (("current mount failed", "The drive reported an error"),
+                               ("ExpiredToken", "AWS sign-in expired")):
+            with self.subTest(error=text):
+                path.write_text(f"{stamp} ERROR : {text}\n")
+                self.assertIn(expected, turtle.tail_error(connection, self.paths))
+
     def test_exported_keys_cannot_override_the_selected_profile(self):
         with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "stale", "AWS_SECRET_ACCESS_KEY": "stale",
                                      "AWS_SESSION_TOKEN": "stale", "RCLONE_S3_ACCESS_KEY_ID": "stale"}):
@@ -220,12 +261,50 @@ class ServiceTests(unittest.TestCase):
         child.terminate.assert_not_called()
         self.assertIn("pending S3 uploads", supervisor.runtime[self.connection["id"]]["message"])
 
-    def test_login_has_a_friendly_bounded_timeout(self):
+    def test_login_uses_device_authorization_for_the_selected_profile(self):
+        with patch.object(turtle, "executable", return_value="/aws"), \
+             patch.object(turtle.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            result = turtle.action(self.args("login", self.connection["id"]), self.paths)
+        self.assertTrue(result["ok"])
+        self.assertEqual(run.call_args.args[0],
+                         ["/aws", "sso", "login", "--use-device-code", "--profile", "production"])
+        self.assertEqual(run.call_args.kwargs["env"]["AWS_PROFILE"], "production")
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+
+    def test_successful_login_records_refresh_without_changing_connection_intent(self):
+        for desired in (False, True):
+            with self.subTest(desiredConnected=desired):
+                with self.store.update() as state:
+                    state["connections"][0]["desiredConnected"] = desired
+                before = dict(self.store.read()["connections"][0])
+                completed_at = 1789370400.5
+                with patch.object(turtle, "executable", return_value="/aws"), \
+                     patch.object(turtle.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+                     patch.object(turtle.time, "time", return_value=completed_at):
+                    turtle.action(self.args("login", self.connection["id"]), self.paths)
+                expected = dict(before, lastLoginAt=completed_at, revision=before["revision"] + 1)
+                self.assertEqual(self.store.read()["connections"][0], expected)
+
+    def test_failed_login_preserves_existing_success_and_connection_state(self):
+        with self.store.update() as state:
+            state["connections"][0].update(lastLoginAt=123.0, desiredConnected=True)
+        before = self.store.read()
+        with patch.object(turtle, "executable", return_value="/aws"), \
+             patch.object(turtle.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stderr="private provider output")):
+            with self.assertRaisesRegex(ValueError, "Close the previous sign-in tab") as error:
+                turtle.action(self.args("login", self.connection["id"]), self.paths)
+        self.assertNotIn("private provider output", str(error.exception))
+        self.assertEqual(self.store.read(), before)
+
+    def test_login_timeout_requests_a_fresh_signin_and_preserves_connection_state(self):
+        before = self.store.read()
         with patch.object(turtle, "executable", return_value="/aws"), \
              patch.object(turtle.subprocess, "run", side_effect=subprocess.TimeoutExpired("aws", 300)) as run:
-            with self.assertRaisesRegex(ValueError, "five minutes"):
+            with self.assertRaisesRegex(ValueError, "five minutes.*Close the previous sign-in tab.*fresh request"):
                 turtle.action(self.args("login", self.connection["id"]), self.paths)
         self.assertEqual(run.call_args.kwargs["timeout"], 300)
+        self.assertEqual(self.store.read(), before)
 
 
 if __name__ == "__main__":
