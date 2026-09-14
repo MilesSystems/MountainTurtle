@@ -92,15 +92,13 @@ notarized release.
   resolving stale mount bookmarks. Direct helper checks completed in under half
   a second, preserving unrelated sidebar entries.
 
-### Remaining macOS permission checks
+### macOS permissions and final Finder verification
 
-The background service's automatic sidebar helper is currently waiting on macOS
-Network Volumes approval after the code-signing change. TCC logs show the old
-ad hoc requirement no longer matches the updated app. The Files and Folders UI
-still shows the old grant as enabled, so that display alone is not proof that
-the new signature has access. The helper now waits nonblockingly for up to 60
-seconds and reports actionable permission guidance while leaving the volume
-connected.
+The code-signing change initially invalidated the old ad hoc Network Volumes
+grant. The Files and Folders UI still showed that old grant as enabled, so that
+display alone did not establish access for the new signature. The helper waits
+nonblockingly for up to 60 seconds and reports actionable permission guidance
+while leaving the volume connected.
 
 After the user approved the prompts, the Finder extension loaded normally.
 Re-enabling it in macOS settings and adding its toolbar item produced the Turtle
@@ -117,10 +115,29 @@ disappears; a regression test covers that ejection interval.
 
 The user's Network Volumes approval at 10:09:52 answered an old ad hoc build's
 queued request. TCC logs show the signed update issued its current request at
-10:11:14; automatic sidebar restoration still awaits that approval. The
-computer-use tool rejects access to macOS's permission-prompt application; the
-user has been asked to approve the current prompt. No TCC database or sandbox
-permission was modified to bypass these checks.
+10:11:14. The user refreshed the permission in System Settings at 15:16:51–53.
+After reconnect, TCC explicitly allowed the signed app and its supervisor-run
+sidebar helper succeeded at 15:17:39, without a signature mismatch or further
+prompt. No TCC database or sandbox permission was modified to bypass approval.
+
+Final live checks on the installed signed build:
+
+- Finder showed exactly one **Nikki Images** row directly under **Locations**,
+  with its own eject button. Clicking the row opened the real bucket root.
+- Clicking that sidebar eject button brought up macOS's native choice between
+  **Eject** and **Eject All**. Choosing **Eject** removed Nikki's kernel mount;
+  the service reported disconnected with `desiredConnected: false`, no stale
+  sidebar warning, and no unwanted immediate reconnection.
+- With the main app closed, the registered login service was cleanly stopped
+  and restarted. It automatically reconnected Nikki and restored one direct
+  sidebar entry, reporting `sidebarItemID: 3883753811` without `sidebarError`.
+  The main app process was absent throughout that restoration.
+- Clicking the restored sidebar row reopened `app-data` and `Portfolio` in
+  Finder. Nikki was left connected in read-only mode, with login restore enabled.
+
+These checks establish actual native sidebar ejection and background restoration,
+not just successful helper output or a manually added sidebar shortcut. They do
+not constitute an actual reboot or logout/login test.
 
 ## Pending or not tested
 
