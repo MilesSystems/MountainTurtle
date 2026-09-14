@@ -62,6 +62,53 @@ uploads were performed to exercise pending-upload badges. Cache checks inspect
 only requested local metadata and backing-file attributes, not the remote
 directory tree.
 
+## Photo browser and drive controls
+
+All 98 service, badge, and photo-browser tests passed. The updated native app,
+Finder extension, and sidebar helper built successfully. The installed app is
+now signed with the Mac's existing Apple Development identity; deep and strict
+signature verification passed. This is still a local development build, not a
+notarized release.
+
+- The native **Browse photos** sheet opened the real Nikki portfolio. For a page
+  containing 29 photos, the first viewport produced 12 local preview JPEGs totaling
+  243,868 bytes; tiles outside that viewport did not request previews.
+- A bounded three-object listing returned a continuation token without loading
+  the rest of the directory. The app requests at most 100 entries per page.
+- A cold-cache check against a 1,686,063-byte JPEG fetched only a 131,072-byte
+  header range and produced a valid preview from its embedded JPEG thumbnail.
+  The check did not fetch the full original or write to S3.
+- **Download original** in the live UI saved the chosen IMG_8625 photo under
+  Downloads/Mountain Turtle and revealed it in Finder. A later UI fix refreshes
+  just that tile from local cache; typecheck and mock checks establish zero
+  additional S3 reads for that refresh.
+- The live cache-settings save safely ejected and reconnected Nikki. Defaults
+  are a 2 GiB original cache and 24 hours without access; these are eviction
+  targets rather than download quotas. Native and rclone read-ahead are disabled.
+- The live rename flow changed **Nikki Images - Turtle** to **Nikki Images** and
+  safely restored the connection. Bucket name and contents were unchanged.
+- A native Locations entry with an eject control was observed using the actual
+  NFS volume. The new sidebar helper replaces only its own entry and avoids
+  resolving stale mount bookmarks. Direct helper checks completed in under half
+  a second, preserving unrelated sidebar entries.
+
+### Remaining macOS permission checks
+
+The background service's automatic sidebar helper is currently waiting on macOS
+Network Volumes approval after the code-signing change. TCC logs show the old
+ad hoc requirement no longer matches the updated app. The Files and Folders UI
+still shows the old grant as enabled, so that display alone is not proof that
+the new signature has access. The helper now waits nonblockingly for up to 60
+seconds and reports actionable permission guidance while leaving the volume
+connected.
+
+The newly signed Finder extension also waits for macOS to approve access to its
+existing sandbox container. Its toolbar actions have been implemented, but the
+final signed build's live menu dispatch and automatic sidebar restoration are
+not yet verified. The computer-use tool rejects access to macOS's permission
+prompt application; the user has been asked to approve the normal prompts.
+No TCC database or sandbox permission was modified to bypass these checks.
+
 ## Pending or not tested
 
 - Reconnect after an actual reboot or logout/login was not tested.
@@ -70,6 +117,7 @@ directory tree.
 - The full [manual acceptance checklist](ACCEPTANCE.md) has not been marked
   complete by this record; unlisted scenarios still require their own evidence.
 
-Million-photo flat-folder paging remains a
-[future design](LARGE_PHOTO_LIBRARIES.md), not an implemented or verified feature.
+The separate photo browser implements bounded paging. A million-photo dataset
+has not been benchmarked. Virtual paging inside Finder's mounted folder tree
+remains a [future design](LARGE_PHOTO_LIBRARIES.md).
 The application's Python runtime requirement is Python 3.9 or later.

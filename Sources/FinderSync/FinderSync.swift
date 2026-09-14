@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import FinderSync
+import os
 
 // The extension only asks the local service about items Finder has displayed.
 // It never opens the network volume or holds AWS credentials.
@@ -136,6 +137,8 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var rootsChecked = Date.distantPast
     private var lastSuccessfulBadges = Date.distantPast
     private let maxTrackedItems = 4096
+    private var actionURLs: [Int: URL] = [:]
+    private var nextActionTag = 1
 
     override init() {
         super.init()
@@ -185,19 +188,118 @@ final class MountainTurtleFinderSync: FIFinderSync {
         scheduleRefresh()
     }
 
+    override var toolbarItemName: String { "Mountain Turtle" }
+
+    override var toolbarItemToolTip: String {
+        "Browse photos, manage the drive, and check local cache status."
+    }
+
+    override var toolbarItemImage: NSImage {
+        let image = NSImage(systemSymbolName: "tortoise.fill", accessibilityDescription: "Mountain Turtle")
+            ?? NSImage(size: NSSize(width: 20, height: 20))
+        image.isTemplate = true
+        return image
+    }
+
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        guard menuKind == .contextualMenuForItems,
-              let selected = controller.selectedItemURLs(), selected.count == 1,
-              let url = selected.first,
-              roots.contains(where: { contains(url.standardizedFileURL.path, in: $0.mountPath) }) else { return nil }
-        let badge = Date().timeIntervalSince(lastSuccessfulBadges) < 10
-            ? currentBadges[url.standardizedFileURL.path] ?? .unknown : .unknown
-        let menu = NSMenu()
-        let item = NSMenuItem(title: "Mountain Turtle: \(badge.label)", action: nil, keyEquivalent: "")
-        item.image = badge.image
-        item.isEnabled = false
-        menu.addItem(item)
+        let selected = controller.selectedItemURLs() ?? []
+        let targets = selected.isEmpty ? [controller.targetedURL()].compactMap { $0 } : selected
+        let selectedRoots = targets.compactMap { url -> Root? in
+            guard url.isFileURL else { return nil }
+            return roots.first { contains(url.standardizedFileURL.path, in: $0.mountPath) }
+        }
+        // Never infer a drive for mixed selections or for Finder windows outside
+        // the managed roots. The host app resolves the stored UUID again on use.
+        let root = selectedRoots.count == targets.count && Set(selectedRoots.map(\.id)).count == 1
+            ? selectedRoots.first : nil
+        guard root != nil || menuKind == .toolbarItemMenu else { return nil }
+
+        let menu = NSMenu(title: "Mountain Turtle")
+        menu.autoenablesItems = false
+        if let root, UUID(uuidString: root.id) != nil {
+            let heading = NSMenuItem(title: root.name, action: nil, keyEquivalent: "")
+            heading.isEnabled = false
+            menu.addItem(heading)
+            if selected.count == 1, let url = selected.first {
+                let badge = Date().timeIntervalSince(lastSuccessfulBadges) < 10
+                    ? currentBadges[url.standardizedFileURL.path] ?? .unknown : .unknown
+                let status = NSMenuItem(title: "Mountain Turtle: \(badge.label)", action: nil, keyEquivalent: "")
+                status.image = badge.image
+                status.isEnabled = false
+                menu.addItem(status)
+            }
+            menu.addItem(.separator())
+            addAction("Browse photos…", symbol: "photo.on.rectangle", action: "browse", root: root, to: menu)
+            addAction("Show drive in Finder", symbol: "folder", action: "finder", root: root, to: menu,
+                      enabled: root.mounted)
+            addAction("Refresh drive", symbol: "arrow.clockwise", action: "refresh", root: root, to: menu,
+                      enabled: root.mounted)
+            addAction(root.mounted ? "Reconnect drive" : "Connect drive", symbol: "bolt.horizontal",
+                      action: "reconnect", root: root, to: menu)
+            menu.addItem(.separator())
+            addAction("Cache settings…", symbol: "internaldrive", action: "settings", root: root, to: menu)
+            addAction("Rename drive…", symbol: "pencil", action: "rename", root: root, to: menu)
+            if root.mounted {
+                addAction("Eject drive", symbol: "eject", action: "eject", root: root, to: menu)
+            }
+            menu.addItem(.separator())
+        }
+        let open = NSMenuItem(title: "Open Mountain Turtle", action: #selector(openTurtle(_:)), keyEquivalent: "")
+        open.target = self
+        if let url = URL(string: "mountainturtle://open") { registerAction(open, url: url) }
+        open.image = toolbarItemImage
+        menu.addItem(open)
         return menu
+    }
+
+    private func addAction(_ title: String, symbol: String, action: String, root: Root,
+                           to menu: NSMenu, enabled: Bool = true) {
+        guard UUID(uuidString: root.id) != nil else { return }
+        var components = URLComponents()
+        components.scheme = "mountainturtle"
+        components.host = "connection"
+        components.path = "/" + root.id
+        components.queryItems = [URLQueryItem(name: "action", value: action)]
+        guard let url = components.url else { return }
+        let item = NSMenuItem(title: title, action: #selector(openTurtle(_:)), keyEquivalent: "")
+        item.target = self
+        registerAction(item, url: url)
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    private func registerAction(_ item: NSMenuItem, url: URL) {
+        // Finder serializes menu items across the extension boundary. Tags are
+        // transported; representedObject is not a reliable payload channel.
+        item.tag = nextActionTag
+        actionURLs[nextActionTag] = url
+        nextActionTag += 1
+        if actionURLs.count > 256 {
+            for key in actionURLs.keys.sorted().prefix(actionURLs.count - 256) { actionURLs.removeValue(forKey: key) }
+        }
+    }
+
+    @objc private func openTurtle(_ sender: NSMenuItem) {
+        let log = Logger(subsystem: "io.mountainturtle.app.findersync", category: "actions")
+        log.notice("Finder action received (tag \(sender.tag, privacy: .public)).")
+        guard let url = actionURLs[sender.tag], url.scheme == "mountainturtle" else {
+            log.error("Finder action expired before it could be opened.")
+            return
+        }
+        // Target the containing app so an older installed backup cannot capture
+        // the URL scheme when Launch Services has indexed multiple builds.
+        let application = Bundle.main.bundleURL.deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        // The sandbox can read the extension bundle without being allowed to
+        // inspect its parent's Info.plist. Launch Services opens the parent.
+        guard application.pathExtension == "app" else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.allowsRunningApplicationSubstitution = false
+        NSWorkspace.shared.open([url], withApplicationAt: application,
+                                configuration: configuration) { _, error in
+            if let error { log.error("Could not open Mountain Turtle: \(error.localizedDescription, privacy: .public)") }
+        }
     }
 
     private func contains(_ path: String, in directory: String) -> Bool {

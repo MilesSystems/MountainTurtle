@@ -49,6 +49,12 @@ The build creates `build/Mountain Turtle.app`; the install script places it in
 startup: the background service must keep a stable path to the app's resources.
 Python, rclone, and AWS CLI are external dependencies, not bundled executables.
 
+For repeated development updates, set `CODE_SIGN_IDENTITY` to an existing Apple
+Development or Developer ID signing identity when building. Using the same
+identity lets macOS recognize subsequent updates. The default is ad hoc signing,
+which can require granting Network Volumes permission again after each rebuild.
+Local signing is not notarization or App Store distribution.
+
 For a temporary development launch after building:
 
 ```sh
@@ -73,6 +79,18 @@ actual NFS mounts. In Finder Settings, enable **Connected servers** under Genera
 for desktop icons and under Sidebar for the sidebar's Locations section.
 Custom volume artwork is provided locally; it does not require uploading an icon
 to your bucket.
+
+Mountain Turtle registers each mounted drive directly under Finder's Locations,
+with its own eject button, and refreshes that entry after reconnecting or renaming.
+This also runs from the login service while the app window is closed. macOS may
+show a separate `localhost` server entry for the underlying transport connection.
+Allow Mountain Turtle's normal Network Volumes permission request. If it was
+denied, review **System Settings → Privacy & Security → Files and Folders →
+Mountain Turtle → Network Volumes**, then reconnect the drive.
+If sidebar registration fails, the drive remains connected; choose **Go →
+Computer**, select the actual Turtle volume, then **File → Add to Sidebar**.
+The isolated native helper uses Apple's public SharedFileList compatibility API,
+which is deprecated and may require adaptation on future macOS versions.
 
 Startup happens after you sign in to macOS. It cannot bypass an expired AWS SSO
 session: use **Sign in to AWS** or
@@ -103,11 +121,31 @@ file for permanent offline access or establish that the cloud copy has not
 changed. The extension requests status for visible items using local cache
 metadata; it does not scan the bucket or download photos to generate badges.
 
+The Turtle toolbar button and contextual menu provide **Browse photos**,
+**Show drive in Finder**, **Refresh folder listings**, **Reconnect**,
+**Download & cache settings**, **Rename drive**, and **Eject**. If the toolbar
+button is hidden, right-click Finder's toolbar, choose **Customize Toolbar**,
+and add Mountain Turtle. Rename and cache changes safely eject and reconnect
+when needed; busy files or pending uploads can prevent the change.
+
 ## Files, caching, and disconnecting
 
 File contents are fetched on demand and cached on this Mac. A connected volume
 is not a complete offline copy, and Finder previews can trigger downloads.
 Cloud latency and the AWS session still matter for files that are not cached.
+
+The default original-file cache target is 2 GiB, with removal after 24 hours
+without access. Both values are configurable per drive. Memory buffering,
+rclone read-ahead, parallel chunk prefetch, and native NFS read-ahead are disabled.
+Sequential reads use chunks no larger than 1 MiB. These settings reduce extra
+reads, but cannot stop Finder from explicitly reading originals for previews.
+Cache size and age are eviction targets, not a cap on total downloads; open or
+dirty files may remain beyond the targets. **Clear cache** only removes safe
+local cached copies after ejection, never S3 objects or pending uploads.
+
+To reduce Finder downloads, turn off **Show icon preview** in View Options
+(⌘J) and hide the Preview pane. Finder cannot distinguish a preview read from
+an application opening the original through this NFS mount.
 
 Read-only connections block cloud edits. If you explicitly enable writing,
 normal file actions can upload, overwrite, rename, or delete S3 objects using
@@ -128,9 +166,23 @@ Finder thumbnail requests can still be expensive. Use existing smaller folders
 when available. There is no automatic bucket scan, thumbnail index, or photo-key
 reorganization during connection setup.
 
-A bounded virtual folder view is described in
-[the future large-library design](docs/LARGE_PHOTO_LIBRARIES.md). It is a proposal,
-not a feature of this release.
+**Browse photos** offers a separate paginated browser: at most 100 folder/file
+entries are requested per page, without fetching subsequent pages automatically.
+Only visible photo tiles request small previews, with at most two requests
+running at once. Leaving the viewport cancels automatic requests.
+
+Previews use an existing local original or an embedded JPEG thumbnail found
+within a bounded 128 KiB header read. Missing previews remain placeholders;
+the browser does not automatically fetch a large original just to fill a tile.
+**Create preview from original** explicitly permits a temporary original fetch
+of up to 32 MiB. **Open original** and **Download original** save a full copy to
+`~/Downloads/Mountain Turtle`; these copies are retained separately from caches.
+Small previews have a separate 256 MiB / 2,048-file cache, keyed by object version.
+Nothing is uploaded to S3. See [photo browser details](docs/PHOTO_BROWSER.md).
+
+A bounded virtual folder view *inside the network drive* is still a proposal in
+[the large-library design](docs/LARGE_PHOTO_LIBRARIES.md). The new photo browser
+does not change the bucket tree or replace Finder's built-in JPEG previews.
 
 ## Local state and troubleshooting
 

@@ -2,10 +2,11 @@ import SwiftUI
 import AppKit
 import Combine
 import FinderSync
+import os
 
-private let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
-private let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
-private let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
+let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
+let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
+let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
 
 struct Connection: Codable, Identifiable, Equatable {
     var id: String
@@ -21,6 +22,9 @@ struct Connection: Codable, Identifiable, Equatable {
     var mountPath: String
     var updatedAt: Double?
     var mounted: Bool?
+    var cacheMaxSizeMiB: Int?
+    var cacheMaxAgeHours: Int?
+    var sidebarError: String?
 
     var isConnected: Bool { state == "connected" }
     var isMounted: Bool { mounted ?? isConnected }
@@ -134,6 +138,8 @@ enum ServiceClient {
     @Published var loginMessage: String?
     @Published var error: String?
     @Published var serviceError: String?
+    @Published var drivePanel: DrivePanel?
+    @Published var driveMessage: String?
     private var refreshing = false
     private var timer: Timer?
 
@@ -188,7 +194,7 @@ enum ServiceClient {
     }
 
     func openFinder(_ connection: Connection) {
-        guard connection.isConnected else { return }
+        guard connection.isMounted else { return }
         let url = URL(fileURLWithPath: connection.mountPath, isDirectory: true)
         // Launch Services can wait on NFS metadata while issuing a sandbox extension.
         // Ask Finder to reveal the volume without blocking the app's main thread.
@@ -201,6 +207,83 @@ enum ServiceClient {
         let guide = ServiceClient.resources.appendingPathComponent("README.md")
         if FileManager.default.fileExists(atPath: guide.path) { NSWorkspace.shared.open(guide) }
         else { error = "The setup guide is README.md in the Mountain Turtle source folder." }
+    }
+
+    func handleURL(_ url: URL) async {
+        guard url.scheme == "mountainturtle", url.user == nil, url.password == nil,
+              url.port == nil, url.fragment == nil else { return }
+        if url.host == "open", url.path.isEmpty || url.path == "/" { return }
+        guard url.host == "connection", url.pathComponents.count == 2,
+              UUID(uuidString: url.lastPathComponent) != nil,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.queryItems?.count == 1,
+              let item = components.queryItems?.first, item.name == "action",
+              let action = item.value,
+              ["finder", "browse", "settings", "rename", "refresh", "reconnect", "eject"].contains(action) else { return }
+        // A toolbar URL can arrive during the launch-time status refresh.
+        // Resolve it with an awaited snapshot rather than dropping the action.
+        do {
+            let status = try JSONDecoder().decode(StatusResponse.self, from: await ServiceClient.run(["status"]))
+            connections = status.connections
+        } catch { self.error = error.localizedDescription; return }
+        guard let connection = connections.first(where: { $0.id == url.lastPathComponent }) else { return }
+        guard activeAction == nil else { error = "Please wait for the current action to finish."; return }
+        selectedID = connection.id
+        switch action {
+        case "finder": openFinder(connection)
+        case "browse": drivePanel = DrivePanel(connection: connection, kind: .photos)
+        case "settings": drivePanel = DrivePanel(connection: connection, kind: .settings)
+        case "rename": drivePanel = DrivePanel(connection: connection, kind: .rename)
+        case "refresh": if await self.action(["refresh", connection.id]) { driveMessage = "Folder listings refreshed. Reopen the folder in Finder to see changes." }
+        case "reconnect": _ = await self.action(["reconnect", connection.id])
+        case "eject": _ = await self.action(["disconnect", connection.id])
+        default: break
+        }
+    }
+
+    // Change local settings only after the service confirms a clean ejection.
+    func updateDrive(_ connection: Connection, arguments: [String]) async -> Bool {
+        guard activeAction == nil else { return false }
+        activeAction = "updating"
+        driveMessage = nil
+        defer { activeAction = nil }
+        var restore = false
+        var beganDisconnect = false
+        func request(_ args: [String]) async throws {
+            let response = try JSONDecoder().decode(ActionResponse.self, from: await ServiceClient.run(args))
+            guard response.ok else { throw TurtleError(message: response.error ?? "Could not update the drive.") }
+        }
+        do {
+            let initial = try JSONDecoder().decode(StatusResponse.self, from: await ServiceClient.run(["status"]))
+            guard let current = initial.connections.first(where: { $0.id == connection.id }) else { throw TurtleError(message: "This connection was removed.") }
+            guard !current.isWorking else { throw TurtleError(message: "Wait for this drive to finish connecting or ejecting, then try again.") }
+            restore = current.desiredConnected
+            if current.isMounted || current.desiredConnected {
+                try await request(["disconnect", connection.id])
+                beganDisconnect = true
+                var ejected = false
+                for attempt in 0..<150 {
+                    let status = try JSONDecoder().decode(StatusResponse.self, from: await ServiceClient.run(["status"]))
+                    guard let live = status.connections.first(where: { $0.id == connection.id }) else { throw TurtleError(message: "This connection was removed.") }
+                    if !live.isMounted && live.state == "disconnected" { ejected = true; break }
+                    if attempt > 2 && live.state == "error" { throw TurtleError(message: live.message ?? "The drive could not eject. Close files using it, then try again.") }
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                }
+                guard ejected else { throw TurtleError(message: "The drive is still ejecting. Wait for it to disconnect, then try again.") }
+            }
+            try await request(arguments)
+            if restore { try await request(["connect", connection.id]) }
+            await refresh()
+            driveMessage = arguments.first == "rename" ? "Drive renamed. Its S3 bucket and cached files are unchanged." : arguments.first == "clear-cache" ? "Local cache cleared." : "Download settings saved."
+            return true
+        } catch {
+            let failure = error.localizedDescription
+            // Cancel a pending eject as well as restoring an already ejected drive.
+            if restore && beganDisconnect { try? await request(["connect", connection.id]) }
+            await refresh()
+            self.error = failure
+            return false
+        }
     }
 }
 
@@ -232,7 +315,7 @@ struct MainView: View {
                 HStack {
                     Text("Your S3 drives").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    Text("PREVIEW 0.1").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
+                    Text("PREVIEW 0.2").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
                     Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.plain).help("Refresh connection status").padding(.leading, 10)
                 }.padding(.horizontal, 32).padding(.vertical, 24)
@@ -257,6 +340,13 @@ struct MainView: View {
         .tint(moss)
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
+        .sheet(item: $model.drivePanel) { panel in
+            switch panel.kind {
+            case .photos: PhotoBrowserView(connection: panel.connection)
+            case .settings: DriveSettingsView(model: model, connection: panel.connection)
+            case .rename: RenameDriveView(model: model, connection: panel.connection)
+            }
+        }
         .alert("Couldn’t finish that action", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -366,12 +456,22 @@ struct MainView: View {
                     }.padding(.top, 5)
                     Spacer()
                     Menu {
+                        Button("Browse photos…") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
+                        Button("Download & cache settings…") { model.drivePanel = DrivePanel(connection: connection, kind: .settings) }
+                        Button("Rename drive…") { model.drivePanel = DrivePanel(connection: connection, kind: .rename) }
+                        Divider()
+                        Button("Refresh folder listings") { Task { await model.action(["refresh", connection.id]) } }.disabled(!connection.isConnected)
+                        Button("Reconnect drive") { Task { await model.action(["reconnect", connection.id]) } }
+                        Divider()
                         Button("Edit connection…") { editing = connection }.disabled(connection.isMounted || connection.desiredConnected || connection.isWorking)
                         Button("Remove connection…", role: .destructive) { removing = connection }.disabled(connection.isMounted || connection.desiredConnected || connection.isWorking)
                     } label: { Image(systemName: "ellipsis.circle").font(.system(size: 20)) }.menuStyle(.borderlessButton).frame(width: 25)
                 }
                 if let message = connection.message, !message.isEmpty {
                     notice(message, symbol: connection.state == "error" || connection.state == "needsLogin" ? "exclamationmark.circle" : "info.circle", color: connection.state == "error" || connection.state == "needsLogin" ? .orange : moss)
+                }
+                if let message = connection.sidebarError, !message.isEmpty {
+                    notice(message, symbol: "sidebar.left", color: .orange)
                 }
                 HStack(spacing: 10) {
                     if connection.isConnected {
@@ -399,6 +499,22 @@ struct MainView: View {
                 if let message = model.loginMessage {
                     notice(message, symbol: "checkmark.circle", color: moss)
                 }
+                if let message = model.driveMessage {
+                    notice(message, symbol: "checkmark.circle", color: moss)
+                }
+                HStack(spacing: 12) {
+                    Image(systemName: "photo.on.rectangle.angled").font(.title2).foregroundStyle(moss)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Browse with smaller previews").font(.system(size: 13, weight: .semibold))
+                        Text("Preview visible photos. Choose which originals to keep.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Browse photos") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
+                }.padding(16).background(cream).clipShape(RoundedRectangle(cornerRadius: 14))
+                Button { model.drivePanel = DrivePanel(connection: connection, kind: .settings) } label: {
+                    Label("Download & cache settings", systemImage: "slider.horizontal.3")
+                }.buttonStyle(.link)
                 VStack(spacing: 0) {
                     infoRow("S3 bucket", connection.bucket, symbol: "shippingbox")
                     Divider().padding(.leading, 42)
@@ -413,8 +529,8 @@ struct MainView: View {
                 HStack(alignment: .top, spacing: 11) {
                     Image(systemName: "leaf").font(.system(size: 19)).foregroundStyle(moss)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("A drive, without the full download").font(.system(size: 13, weight: .semibold))
-                        Text("Files are cached as you use them. Large folders can take time to list, and AWS may occasionally ask you to sign in again.")
+                        Text("Download only as needed").font(.system(size: 13, weight: .semibold))
+                        Text("Finder previews can read original photos. Use Browse photos to avoid those full downloads, or turn off icon previews in Finder’s View Options. AWS may occasionally ask you to sign in again.")
                             .font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                     }
                 }.padding(.top, 2)
@@ -548,6 +664,12 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
     @objc private func quitApp() { NSApp.terminate(nil) }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Logger(subsystem: "io.mountainturtle.app", category: "actions").notice("Received a Finder URL action.")
+        guard let url = urls.first, url.scheme == "mountainturtle" else { return }
+        showWindow()
+        Task { await AppModel.shared.handleURL(url) }
+    }
 }
 
 @main struct MountainTurtleApp: App {

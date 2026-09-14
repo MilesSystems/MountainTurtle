@@ -20,6 +20,10 @@ import uuid
 
 LABEL = "com.mountainturtle.service"
 SERVICE = Path(__file__).resolve()
+CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
+SIDEBAR_PERMISSION_TIMEOUT = 60
+SIDEBAR_FALLBACK = ("The drive stays connected. In Finder, choose Go → Computer, select the drive, "
+                    "then File → Add to Sidebar.")
 AUTH_ERRORS = re.compile(r"expiredtoken|token.{0,30}expir|sso.{0,50}(invalid|fail|expir)|"
                          r"refresh cached credentials|tokenretrievalerror|invalidgrant|"
                          r"unauthorizedexception|aws sso login", re.I)
@@ -144,6 +148,19 @@ def validate_fields(name, bucket, profile, region):
     return name
 
 
+def cache_settings(connection, size=None, age=None):
+    values = {key: connection.get(key, default) for key, default in CACHE_DEFAULTS.items()}
+    if size is not None:
+        values["cacheMaxSizeMiB"] = size
+    if age is not None:
+        values["cacheMaxAgeHours"] = age
+    if not 64 <= values["cacheMaxSizeMiB"] <= 1048576:
+        raise ValueError("Choose a cache limit between 64 and 1048576 MiB")
+    if not 1 <= values["cacheMaxAgeHours"] <= 8760:
+        raise ValueError("Choose a cache age between 1 and 8760 hours")
+    return values
+
+
 class Store:
     def __init__(self, paths):
         self.paths = paths
@@ -197,19 +214,21 @@ def connection_config(connection, paths):
 
 def mount_command(connection, paths, rclone, remote):
     identity = connection["id"]
+    cache = cache_settings(connection)
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
-               "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks",
+               "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
                "--no-modtime", "--noappledouble", "--noapplexattr", "--umask", "077",
                "--file-perms", "0600", "--dir-perms", "0700",
                "--filter", "+ /._.", "--filter", "+ /._.VolumeIcon.icns",
                "--filter", "- .DS_Store", "--filter", "- ._*",
                "--filter", "- .Spotlight-V100/**", "--filter", "- .Trashes/**",
                "--vfs-cache-mode", "full", "--cache-dir", str(paths.cache / identity),
-               "--vfs-cache-max-size", "2Gi", "--vfs-cache-min-free-space", "20Gi",
-               "--vfs-cache-max-age", "24h", "--vfs-write-back", "5s",
-               "--dir-cache-time", "30m", "--poll-interval", "0", "--buffer-size", "4Mi",
-               "--vfs-read-chunk-size", "8Mi", "--vfs-read-chunk-size-limit", "128Mi",
+               "--vfs-cache-max-size", f'{cache["cacheMaxSizeMiB"]}Mi', "--vfs-cache-min-free-space", "20Gi",
+               "--vfs-cache-max-age", f'{cache["cacheMaxAgeHours"]}h', "--vfs-write-back", "5s",
+               "--dir-cache-time", "30m", "--poll-interval", "0", "--buffer-size", "0",
+               "--vfs-read-ahead", "0", "--vfs-read-chunk-streams", "0",
+               "--vfs-read-chunk-size", "1Mi", "--vfs-read-chunk-size-limit", "1Mi",
                "--contimeout", "10s", "--timeout", "1m", "--transfers", "2",
                "--log-level", "NOTICE", "--log-file", str(paths.logs / (identity + ".log")),
                "--log-file-max-size", "2Mi", "--log-file-max-backups", "2"]
@@ -268,6 +287,48 @@ def pending_writes(connection, paths):
     return False
 
 
+def cache_info(connection, paths, max_entries=10000, max_seconds=0.25):
+    """Bounded local disk usage; sparse file logical sizes are not downloaded bytes."""
+    root = paths.cache / connection["id"]
+    result = {"ok": True, "usedBytes": 0, "files": 0, "partial": False}
+    if paths.cache.is_symlink() or root.is_symlink():
+        raise ValueError("The cache folder must not be a symbolic link")
+    deadline, visited, directories = time.monotonic() + max_seconds, 0, [root]
+    while directories:
+        directory = directories.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if visited >= max_entries or time.monotonic() >= deadline:
+                        result["partial"] = True
+                        return result
+                    visited += 1
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        result["usedBytes"] += entry.stat(follow_symlinks=False).st_blocks * 512
+                        if "vfs" in Path(entry.path).relative_to(root).parts[:-1]:
+                            result["files"] += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            result["partial"] = True
+    return result
+
+
+def clear_cache(connection, paths):
+    root = paths.cache / connection["id"]
+    if paths.cache.is_symlink() or root.is_symlink():
+        raise ValueError("The cache folder must not be a symbolic link")
+    # A previous writable session may have pending data even after a settings change.
+    if pending_writes(dict(connection, readOnly=False), paths):
+        raise ValueError("Cached changes still need uploading. Reconnect this drive before clearing its cache")
+    if root.exists():
+        shutil.rmtree(root)
+
+
 class ExistingProcess:
     """Adopt an exact matching orphan after a supervisor crash; never duplicate its cache."""
     def __init__(self, pid):
@@ -282,6 +343,9 @@ class ExistingProcess:
         except ProcessLookupError:
             pass
 
+    def send_signal(self, sig):
+        os.kill(self.pid, sig)
+
 
 class Supervisor:
     def __init__(self, paths):
@@ -291,10 +355,97 @@ class Supervisor:
         self.revisions = {}
         self.stop_requested = False
         self.badge_connections = []
+        self.sidebar_processes, self.sidebar_results = {}, {}
 
     def record(self, connection, state, message="", pid=None):
         self.runtime[connection["id"]] = {"state": state, "message": message, "pid": pid,
-                                          "updatedAt": time.time()}
+                                          "updatedAt": time.time(), **self.sidebar_results.get(connection["id"], {})}
+
+    def start_sidebar(self, connection, child):
+        """Once per confirmed mount generation, including adopted rclone processes."""
+        # The native helper updates one shared Favorites registry. Queue other
+        # connections until its bounded operation completes, without extra attempts.
+        if child.get("sidebarAttempted") or self.sidebar_processes:
+            return
+        child["sidebarAttempted"] = True
+        identity = connection["id"]
+        self.sidebar_results.pop(identity, None)
+        helper = self.paths.resources.parent / "Helpers/Mountain Turtle Sidebar"
+        try:
+            if not helper.is_file() or not os.access(helper, os.X_OK):
+                raise FileNotFoundError(str(helper))
+            process = subprocess.Popen([str(helper), "ensure", identity, str(self.paths.mounts / connection["name"])],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.sidebar_processes[identity] = {"process": process, "started": time.monotonic(),
+                                                 "child": child, "path": str(self.paths.mounts / connection["name"])}
+        except OSError as error:
+            logging.warning("Could not start sidebar helper for %s: %s", identity, type(error).__name__)
+            self.sidebar_failure(identity, "Could not add the drive to Finder's sidebar. In Finder, choose Go → Computer, select the drive, then File → Add to Sidebar.")
+
+    def sidebar_failure(self, identity, message):
+        self.sidebar_results[identity] = {"sidebarError": message}
+        logging.warning("Sidebar update for %s: %s", identity, message)
+
+    @staticmethod
+    def stop_sidebar_process(process):
+        """Reap only this owned helper; mounted rclone processes are independent."""
+        try:
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=0.2)
+        except ProcessLookupError:
+            process.wait(timeout=0.2)
+
+    def poll_sidebars(self, connections, mounts):
+        by_id = {connection["id"]: connection for connection in connections}
+        for identity, job in list(self.sidebar_processes.items()):
+            process = job["process"]
+            connection = by_id.get(identity, {})
+            cancelled = (self.stop_requested or not connection.get("desiredConnected")
+                         or connection.get("reconnectRequested") or job["path"] not in mounts
+                         or self.children.get(identity) is not job["child"])
+            running = process.poll() is None
+            # macOS may be waiting for the user's Network Volumes permission.
+            # Poll without blocking drive supervision while that prompt is open.
+            timed_out = running and time.monotonic() - job["started"] >= SIDEBAR_PERMISSION_TIMEOUT
+            if running and not cancelled and not timed_out:
+                continue
+            self.sidebar_processes.pop(identity)
+            try:
+                if cancelled or timed_out:
+                    self.stop_sidebar_process(process)
+                    if timed_out and not cancelled:
+                        self.sidebar_failure(identity, "Finder sidebar update timed out. In System Settings → Privacy & Security → "
+                                             "Files and Folders → Mountain Turtle, allow Network Volumes, then reconnect to retry. "
+                                             + SIDEBAR_FALLBACK)
+                    continue
+                output, _ = process.communicate(timeout=0.2)
+                result = json.loads(output) if len(output) <= 16384 else {}
+                item = result.get("itemID")
+                if process.returncode or result.get("ok") is not True or type(item) is not int or not 0 <= item <= 0xffffffff:
+                    detail = str(result.get("error", "Finder sidebar update did not finish."))[:256]
+                    self.sidebar_failure(identity, detail + " " + SIDEBAR_FALLBACK)
+                    continue
+                self.sidebar_results[identity] = {"sidebarItemID": item}
+                if result.get("warnings"):
+                    self.sidebar_results[identity]["sidebarError"] = "The drive was added to Finder, but an older sidebar entry may need to be removed manually."
+                    warnings = result["warnings"]
+                    detail = " ".join(value[:160] for value in warnings[:4] if isinstance(value, str))[:512] if isinstance(warnings, list) else "Unexpected helper warning format"
+                    logging.warning("Sidebar update for %s: %s", identity, detail)
+                logging.info("Finder sidebar updated for %s (item %s)", identity, item)
+            except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+                self.sidebar_failure(identity, "Finder sidebar helper returned an invalid response; the drive stays connected.")
+
+    def stop_sidebars(self):
+        for identity, job in list(self.sidebar_processes.items()):
+            try:
+                self.stop_sidebar_process(job["process"])
+            except (OSError, subprocess.TimeoutExpired):
+                logging.warning("Could not reap sidebar helper for %s", identity)
+        self.sidebar_processes.clear()
 
     def publish(self):
         write_json(self.paths.base / "runtime.json",
@@ -318,7 +469,8 @@ class Supervisor:
         identity = connection["id"]
         with self.store.update() as state:
             current = find_connection(state, identity)
-            if not current.get("desiredConnected") or current.get("revision") != connection.get("revision"):
+            if (not current.get("desiredConnected") or current.get("reconnectRequested")
+                    or current.get("revision") != connection.get("revision")):
                 return
             deps = dependencies()
             if not deps["rclone"]:
@@ -345,6 +497,7 @@ class Supervisor:
             # Logs span reconnects; keep errors from an earlier process out of
             # the new connection's status, including after supervisor recovery.
             current["lastMountAt"] = connection["lastMountAt"] = started
+            current.pop("refreshRequested", None)
             self.children[identity] = {"process": process, "started": started, "seenMounted": False}
             self.record(connection, "connecting", "Connecting to S3…", process.pid)
             self.publish()
@@ -371,12 +524,15 @@ class Supervisor:
                 state["shutdown"] = True
                 for connection in state["connections"]:
                     connection["desiredConnected"] = False
+                    connection["reconnectRequested"] = False
                     connection["revision"] = connection.get("revision", 0) + 1
         mounts = mount_table()
         now = time.time()
+        self.poll_sidebars(state["connections"], mounts)
         for connection in state["connections"]:
             identity = connection["id"]
-            desired = connection.get("desiredConnected", False)
+            reconnecting = connection.get("reconnectRequested", False) and connection.get("desiredConnected", False)
+            desired = connection.get("desiredConnected", False) and not reconnecting
             if self.revisions.get(identity) != connection.get("revision", 0):
                 self.retry[identity] = 0
                 self.revisions[identity] = connection.get("revision", 0)
@@ -388,7 +544,7 @@ class Supervisor:
                 child["seenMounted"] = True
             # A disappearing live mount, or its clean server exit, is Finder eject.
             # Preserve that user choice; only failures should automatically reconnect.
-            if (desired and child and child.get("seenMounted") and not ejecting
+            if (desired and child and child.get("seenMounted") and not child.get("expectedStop") and not ejecting
                     and ((not mounted and child["process"].poll() is None) or child["process"].poll() == 0)):
                 with self.store.update() as current_state:
                     current = find_connection(current_state, identity)
@@ -411,6 +567,7 @@ class Supervisor:
                                 child["process"].pid if child else None)
                     continue
                 if child and child["process"].poll() is None and not pending_writes(connection, self.paths):
+                    child["expectedStop"] = True
                     child["process"].terminate()  # NFS has already been safely detached.
             if child and child["process"].poll() is not None:
                 self.children.pop(identity)
@@ -429,12 +586,33 @@ class Supervisor:
                     if pending_writes(connection, self.paths):
                         self.record(connection, "disconnecting", "Waiting for pending S3 uploads; cached changes are preserved.", child["process"].pid)
                     else:
+                        child["expectedStop"] = True
                         child["process"].terminate()
                         self.record(connection, "disconnecting", "Finishing disconnection…", child["process"].pid)
                 else:
-                    self.record(connection, "disconnected")
+                    if reconnecting:
+                        with self.store.update() as current_state:
+                            current = find_connection(current_state, identity)
+                            if current.get("revision", 0) == connection.get("revision", 0):
+                                current["reconnectRequested"] = False
+                        self.retry[identity] = 0
+                        self.record(connection, "connecting", "Reconnecting safely…")
+                    else:
+                        self.record(connection, "disconnected")
                 continue
             if mounted and child:
+                if not child.get("expectedStop"):
+                    self.start_sidebar(connection, child)
+                if connection.get("refreshRequested") and now - child["started"] >= 5:
+                    # SIGHUP only invalidates directory listings; it does not fetch file data.
+                    try:
+                        child["process"].send_signal(signal.SIGHUP)
+                    except ProcessLookupError:
+                        continue  # The next tick handles the process exit and normal backoff.
+                    with self.store.update() as current_state:
+                        current = find_connection(current_state, identity)
+                        if current.get("revision", 0) == connection.get("revision", 0):
+                            current["refreshRequested"] = False
                 message = tail_error(connection, self.paths)
                 self.record(connection, "needsLogin" if "sign-in expired" in message else "connected",
                             message, child["process"].pid)
@@ -448,6 +626,7 @@ class Supervisor:
                 continue
             if child:
                 if now - child["started"] > 60 and not pending_writes(connection, self.paths):
+                    child["expectedStop"] = True
                     child["process"].terminate()  # No mount exists; failed startup only.
                     self.record(connection, "error", "Connection took too long; retrying shortly.", child["process"].pid)
                 continue
@@ -463,7 +642,7 @@ class Supervisor:
             mounted=str(self.paths.mounts / connection["name"]) in mounts)
             for connection in state["connections"]]
         self.publish()
-        return not (state.get("shutdown") and not self.children and not self.ejections
+        return not (state.get("shutdown") and not self.children and not self.ejections and not self.sidebar_processes
                     and not any(str(self.paths.mounts / c["name"]) in mounts for c in state["connections"]))
 
     def serve(self, at_login=False):
@@ -493,6 +672,7 @@ class Supervisor:
                 while self.tick():
                     time.sleep(1)
             finally:
+                self.stop_sidebars()
                 bridge.stop()
 
 
@@ -519,12 +699,15 @@ def status(paths):
     connections = []
     for connection in saved["connections"]:
         item = {key: connection[key] for key in ("id", "name", "bucket", "profile", "region", "readOnly", "autoConnect")}
+        item.update(cache_settings(connection))
         live = runtime.get(connection["id"], {})
         item.update(desiredConnected=connection.get("desiredConnected", False),
                     state=live.get("state", "disconnected") if running else "disconnected",
                     message=live.get("message", "") if running else "", mountPath=str(paths.mounts / connection["name"]),
                     updatedAt=live.get("updatedAt", connection.get("updatedAt", 0)))
         item["mounted"] = item["mountPath"] in mounted
+        if running:
+            item.update({key: live[key] for key in ("sidebarItemID", "sidebarError") if key in live})
         if item["mountPath"] in mounted and item["state"] == "disconnected":
             item.update(state="connected", message="Drive remains attached; connect to resume supervision.")
         connections.append(item)
@@ -575,8 +758,17 @@ def parser():
             operation.add_argument("--" + field, required=True)
         operation.add_argument("--read-only", action="store_true")
         operation.add_argument("--auto-connect", action="store_true")
-    for command in ("remove", "connect", "disconnect", "login"):
+        operation.add_argument("--cache-max-size-mib", type=int)
+        operation.add_argument("--cache-max-age-hours", type=int)
+    for command in ("remove", "connect", "disconnect", "login", "refresh", "reconnect", "cache-info", "clear-cache"):
         commands.add_parser(command).add_argument("id")
+    rename = commands.add_parser("rename")
+    rename.add_argument("id")
+    rename.add_argument("--name", required=True)
+    settings = commands.add_parser("settings")
+    settings.add_argument("id")
+    settings.add_argument("--cache-max-size-mib", type=int)
+    settings.add_argument("--cache-max-age-hours", type=int)
     commands.add_parser("autostart").add_argument("setting", choices=("on", "off"))
     commands.add_parser("serve").add_argument("--at-login", action="store_true")
     commands.add_parser("shutdown")
@@ -587,6 +779,8 @@ def action(args, paths):
     store = Store(paths)
     if args.command == "status":
         return status(paths)
+    if args.command == "cache-info":
+        return cache_info(find_connection(store.read(), args.id), paths)
     paths.prepare()
     if args.command == "serve":
         Supervisor(paths).serve(args.at_login)
@@ -618,6 +812,7 @@ def action(args, paths):
             state["shutdown"] = True
             for connection in state["connections"]:
                 connection["desiredConnected"] = False
+                connection["reconnectRequested"] = False
                 connection["revision"] = connection.get("revision", 0) + 1
         busy = [c["name"] for c in status(paths)["connections"] if c["state"] == "connected"]
         if busy and not service_running(paths):
@@ -633,23 +828,46 @@ def action(args, paths):
             if args.command == "edit":
                 connection = find_connection(state, identity)
                 assert_disconnected(connection, store.runtime(), mounted, paths)
+                if pending_writes(dict(connection, readOnly=False), paths):
+                    raise ValueError("Upload pending cached changes before editing this connection")
             else:
                 connection = {"id": identity}
                 state["connections"].append(connection)
             connection.update(name=name, bucket=args.bucket, profile=args.profile, region=args.region,
                               readOnly=args.read_only, autoConnect=args.auto_connect, desiredConnected=False,
                               updatedAt=time.time(), revision=connection.get("revision", 0) + 1)
+            connection.update(cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours))
         else:
             connection = find_connection(state, args.id)
             identity = args.id
             if args.command == "remove":
                 assert_disconnected(connection, store.runtime(), mounted, paths)
                 state["connections"].remove(connection)
-            elif args.command in ("connect", "disconnect"):
-                connection["desiredConnected"] = args.command == "connect"
+            elif args.command in ("rename", "settings", "clear-cache"):
+                assert_disconnected(connection, store.runtime(), mounted, paths)
+                if args.command == "rename":
+                    name = validate_fields(args.name, connection["bucket"], connection["profile"], connection["region"])
+                    if any(c["name"].casefold() == name.casefold() and c["id"] != identity for c in state["connections"]):
+                        raise ValueError("Another saved drive already uses this name")
+                    connection["name"] = name
+                elif args.command == "settings":
+                    connection.update(cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours))
+                else:
+                    clear_cache(connection, paths)
+                connection["updatedAt"] = time.time()
+                connection["revision"] = connection.get("revision", 0) + 1
+            elif args.command in ("connect", "disconnect", "reconnect", "refresh"):
+                if args.command == "refresh":
+                    if str(paths.mounts / connection["name"]) not in mounted:
+                        raise ValueError("Connect this drive before refreshing its folders")
+                    connection["refreshRequested"] = True
+                    connection["desiredConnected"] = True
+                else:
+                    connection["desiredConnected"] = args.command != "disconnect"
+                    connection["reconnectRequested"] = args.command == "reconnect"
                 connection["revision"] = connection.get("revision", 0) + 1
                 state["shutdown"] = False
-    if args.command == "connect" or (args.command == "disconnect" and str(paths.mounts / connection["name"]) in mounted):
+    if args.command in ("connect", "reconnect", "refresh") or (args.command == "disconnect" and str(paths.mounts / connection["name"]) in mounted):
         ensure_service(paths)
     return {"ok": True, "id": identity}
 

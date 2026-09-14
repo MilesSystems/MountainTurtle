@@ -5,6 +5,7 @@ PROJECT_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIR="$PROJECT_DIR/build"
 APP_NAME="Mountain Turtle"
 PYTHON_BIN=${PYTHON_BIN:-$(command -v python3 || true)}
+CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY:--}
 
 if [[ -z "$PYTHON_BIN" ]]; then
     echo "Python 3 is required to package Mountain Turtle." >&2
@@ -56,6 +57,14 @@ mkdir -p -- "$EXTENSION_PATH/Contents/MacOS"
     "$PROJECT_DIR/Sources/FinderSync/FinderSync.swift" \
     -o "$EXTENSION_PATH/Contents/MacOS/Mountain Turtle Finder"
 
+# SharedFileList remains the macOS compatibility API for native Locations items.
+# Keep it in a bounded helper so sidebar integration cannot block drive service.
+HELPER_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Sidebar"
+mkdir -p -- "$(dirname -- "$HELPER_PATH")"
+/usr/bin/xcrun clang -O2 -fobjc-arc -mmacosx-version-min=14.0 \
+    -Wno-deprecated-declarations -framework Foundation -framework CoreServices \
+    "$PROJECT_DIR/Sources/SidebarMounts/main.m" -o "$HELPER_PATH"
+
 "$PYTHON_BIN" - "$PROJECT_DIR" "$APP_PATH" <<'PY'
 from pathlib import Path
 import os
@@ -92,13 +101,17 @@ info = {
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleName": "Mountain Turtle",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.1.0",
-    "CFBundleVersion": "0.1.0",
+    "CFBundleShortVersionString": "0.2.0",
+    "CFBundleVersion": "0.2.0",
+    "CFBundleURLTypes": [{"CFBundleURLName": "io.mountainturtle.app.actions",
+                          "CFBundleURLSchemes": ["mountainturtle"],
+                          "CFBundleTypeRole": "Viewer"}],
     "CFBundleIconFile": "AppIcon",
     "LSApplicationCategoryType": "public.app-category.utilities",
     "LSMinimumSystemVersion": "14.0",
     "LSUIElement": False,
     "NSHighResolutionCapable": True,
+    "NSNetworkVolumesUsageDescription": "Mountain Turtle accesses your connected S3 drives to show them directly in Finder's sidebar.",
     "NSPrincipalClass": "NSApplication",
     "NSHumanReadableCopyright": "Copyright © 2026 Mountain Turtle contributors. MIT License.",
 }
@@ -132,9 +145,10 @@ with (extension / "Info.plist").open("wb") as stream:
 (extension / "PkgInfo").write_bytes(b"XPC!????")
 PY
 
-/usr/bin/codesign --force --sign - --timestamp=none \
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none \
     --entitlements "$PROJECT_DIR/Sources/FinderSync/Entitlements.plist" "$EXTENSION_PATH"
-/usr/bin/codesign --force --sign - --timestamp=none "$APP_PATH"
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$HELPER_PATH"
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"
 if [[ -e "$BUILD_DIR/$APP_NAME.app" ]]; then
