@@ -1,0 +1,32 @@
+# Local build outputs
+/build/
+/.build/
+/.swiftpm/
+/DerivedData/
+*.dSYM/
+*.xcuserstate
+xcuserdata/
+
+# Python development state
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+/.pytest_cache/
+.coverage
+htmlcov/
+
+# Local-only settings, credentials, and logs
+/.env
+/.env.*
+!/.env.example
+/.aws/
+/rclone.conf
+*.log
+/local/
+
+# macOS metadata
+.DS_Store
+._*
+# Intentional Finder metadata used by the local volume-icon overlay
+!/Resources/icon-overlay/._*
