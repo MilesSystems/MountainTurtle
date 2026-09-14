@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import FinderSync
 
 private let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
 private let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
@@ -127,6 +128,7 @@ enum ServiceClient {
     @Published var dependencies = Dependencies()
     @Published var selectedID: String?
     @Published var launchAtLogin = false
+    @Published var finderBadgesEnabled = false
     @Published var isLoading = true
     @Published var activeAction: String?
     @Published var loginMessage: String?
@@ -149,6 +151,7 @@ enum ServiceClient {
 
     func refresh() async {
         guard !refreshing else { return }
+        finderBadgesEnabled = FIFinderSyncController.isExtensionEnabled
         refreshing = true
         defer { refreshing = false; isLoading = false }
         do {
@@ -311,6 +314,11 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Toggle("Restore drives at login", isOn: Binding(get: { model.launchAtLogin }, set: { value in Task { await model.action(["autostart", value ? "on" : "off"]) } }))
                     .toggleStyle(.checkbox).font(.system(size: 11)).disabled(model.activeAction != nil)
+                Button { FIFinderSyncController.showExtensionManagementInterface() } label: {
+                    Label(model.finderBadgesEnabled ? "Finder badges enabled" : "Enable Finder badges…",
+                          systemImage: model.finderBadgesEnabled ? "checkmark.seal" : "externaldrive.badge.checkmark")
+                        .font(.system(size: 11))
+                }.buttonStyle(.link).help("Show cloud and local-cache status on files in Finder")
                 HStack(spacing: 5) {
                     Image(systemName: "heart").font(.system(size: 10))
                     Text("Free & open source").font(.system(size: 10))

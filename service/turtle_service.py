@@ -290,6 +290,7 @@ class Supervisor:
         self.retry, self.failures, self.blocked = {}, {}, {}
         self.revisions = {}
         self.stop_requested = False
+        self.badge_connections = []
 
     def record(self, connection, state, message="", pid=None):
         self.runtime[connection["id"]] = {"state": state, "message": message, "pid": pid,
@@ -456,6 +457,11 @@ class Supervisor:
                 except Exception as error:
                     self.record(connection, "error", str(error))
                     self.retry[identity] = now + 30
+        self.badge_connections = [dict(connection,
+            mountPath=str(self.paths.mounts / connection["name"]),
+            state=self.runtime.get(connection["id"], {}).get("state", "disconnected"),
+            mounted=str(self.paths.mounts / connection["name"]) in mounts)
+            for connection in state["connections"]]
         self.publish()
         return not (state.get("shutdown") and not self.children and not self.ejections
                     and not any(str(self.paths.mounts / c["name"]) in mounts for c in state["connections"]))
@@ -477,8 +483,17 @@ class Supervisor:
                     for connection in state["connections"]:
                         connection["desiredConnected"] = connection.get("autoConnect", False)
             self.recover(self.store.read()["connections"])
-            while self.tick():
-                time.sleep(1)
+            from finder_badges import BadgeBridge
+            bridge = BadgeBridge(self.paths, lambda: self.badge_connections)
+            try:
+                bridge.start()
+            except (OSError, ValueError):
+                logging.exception("Finder badge service could not start; drives remain available")
+            try:
+                while self.tick():
+                    time.sleep(1)
+            finally:
+                bridge.stop()
 
 
 def ensure_service(paths):

@@ -70,6 +70,30 @@ AWS SSO can require interactive renewal. Reconnect logic should not repeatedly
 open browser windows or treat failed credentials as an empty bucket. A graceful
 shutdown retains cached data and reports any volumes it could not eject.
 
+## Finder file status
+
+The app embeds a sandboxed Finder Sync extension. macOS calls it for items
+being displayed inside the connected mount roots. The extension registers
+original badge images and native status labels, and provides a status-only
+context-menu item. It keeps a bounded set of requested URLs and clears stale
+status when the local service is unavailable.
+
+The supervisor hosts an authenticated HTTP bridge bound to an ephemeral
+loopback port. Its private discovery file is
+`~/Library/Application Support/Mountain Turtle/Finder/bridge.json`. The
+extension has a read-only sandbox exception for that directory and network
+client access; it never reads AWS configuration or credentials. Requests carry
+the per-service token in a header. The bridge rejects browser-origin requests,
+wrong hosts, missing authentication, oversized batches, and paths outside the
+configured mounts. It does not log requested paths or tokens.
+
+Badge lookup reads the matching local rclone metadata and checks its backing
+file through directory descriptors without following symbolic links. Complete
+byte-range coverage means cached; partial coverage means partially cached;
+dirty metadata means pending upload. No recursive cache or S3 listing is
+required. Those states do not establish active transfer, permanent offline
+retention, or remote freshness. Corrupt or ambiguous metadata yields unknown.
+
 ## Current limits
 
 This release is an S3 connection manager with native Finder mounts. It does not

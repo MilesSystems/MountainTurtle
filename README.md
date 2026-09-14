@@ -84,6 +84,25 @@ previous sign-in tab and choose **Sign in to AWS** to start a fresh request.
 Credentials remain under the AWS tools' management;
 Mountain Turtle saves connection settings rather than AWS access keys.
 
+## Finder file badges
+
+Choose **Enable Finder badges…** in Mountain Turtle and enable its Finder
+extension in macOS. Finder can then show a status badge and label on each item
+you browse inside a connected Mountain Turtle volume.
+
+| Badge | Meaning |
+| --- | --- |
+| Cloud | Online only; no local file cache is recorded. |
+| Green check | Cached on this Mac; the file's entire contents are cached. |
+| Partial cache | Only part of the file is cached. This does not prove an active transfer. |
+| Blue arrows | Waiting to upload; local changes remain pending. |
+| Unknown | Status is unavailable or cannot be established safely. |
+
+Cached files can be evicted when the cache fills. A green check does not pin a
+file for permanent offline access or establish that the cloud copy has not
+changed. The extension requests status for visible items using local cache
+metadata; it does not scan the bucket or download photos to generate badges.
+
 ## Files, caching, and disconnecting
 
 File contents are fetched on demand and cached on this Mac. A connected volume

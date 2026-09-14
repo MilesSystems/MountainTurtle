@@ -43,6 +43,25 @@ All 26 service tests passed after the sign-in fix, including failed/expired
 sign-in state preservation and suppression of errors from previous mount
 attempts. Current-attempt errors remain visible.
 
+## Finder file badges
+
+All 47 service and badge tests passed. The combined app and sandboxed Finder
+extension built successfully and passed deep signature verification. The
+installed extension was registered and enabled in macOS; the app displayed
+**Finder badges enabled**.
+
+The live badge bridge reported the existing photo as `cached` from local cache
+metadata. Finder's icon view of Nikki's `Carmen&Blake` folder visibly showed
+green check badges and online-only cloud badges. As Finder generated previews,
+those cloud badges updated to green checks. The selected photo's context menu
+showed **Mountain Turtle: Cached on this Mac**. This verifies the native badges
+and labels on the actual NFS volume, not just a status API or mockup.
+
+Partial-cache and pending-upload states are covered by local fixtures. No live
+uploads were performed to exercise pending-upload badges. Cache checks inspect
+only requested local metadata and backing-file attributes, not the remote
+directory tree.
+
 ## Pending or not tested
 
 - Reconnect after an actual reboot or logout/login was not tested.

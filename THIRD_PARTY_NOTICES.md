@@ -10,7 +10,7 @@ does not relicense those components.
 | rclone | Separately installed executable providing S3 access, NFS mounting, and the file cache | [MIT; Nick Craig-Wood and contributors](https://rclone.org/licence/) |
 | AWS CLI v2 | Separately installed executable for AWS profiles and SSO sign-in | [Apache License 2.0](https://github.com/aws/aws-cli/blob/v2/LICENSE.txt); its distribution includes additional dependency notices |
 | Python 3 | Separately installed interpreter; service uses the standard library | [Python Software Foundation license and associated notices](https://docs.python.org/3/license.html) |
-| SwiftUI, AppKit, Foundation, and macOS tools | Apple-provided system frameworks and tools | Applicable Apple SDK and operating-system terms; these frameworks are not redistributed here |
+| SwiftUI, AppKit, Finder Sync, Foundation, and macOS tools | Apple-provided system frameworks and tools | Applicable Apple SDK and operating-system terms; these frameworks are not redistributed here |
 
 No rclone, AWS CLI, or Python binary is vendored by the current build. If a future
 release bundles dependencies, it must carry the actual licenses and notices for

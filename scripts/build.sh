@@ -44,8 +44,17 @@ fi
 echo "Building Mountain Turtle for $(uname -m), macOS 14 or newer…"
 /usr/bin/xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx14.0" \
     -sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
-    -framework AppKit -framework SwiftUI \
+    -framework AppKit -framework SwiftUI -framework FinderSync \
     "${COMPILE_MODE[@]}" "${SOURCES[@]}" -o "$APP_PATH/Contents/MacOS/$APP_NAME"
+
+EXTENSION_PATH="$APP_PATH/Contents/PlugIns/Mountain Turtle Finder.appex"
+mkdir -p -- "$EXTENSION_PATH/Contents/MacOS"
+/usr/bin/xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx14.0" \
+    -sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
+    -application-extension -parse-as-library -module-name MountainTurtleFinder \
+    -framework AppKit -framework FinderSync -Xlinker -e -Xlinker _NSExtensionMain \
+    "$PROJECT_DIR/Sources/FinderSync/FinderSync.swift" \
+    -o "$EXTENSION_PATH/Contents/MacOS/Mountain Turtle Finder"
 
 "$PYTHON_BIN" - "$PROJECT_DIR" "$APP_PATH" <<'PY'
 from pathlib import Path
@@ -96,8 +105,35 @@ info = {
 with (app / "Contents/Info.plist").open("wb") as stream:
     plistlib.dump(info, stream, sort_keys=True)
 (app / "Contents/PkgInfo").write_bytes(b"APPL????")
+
+extension = app / "Contents/PlugIns/Mountain Turtle Finder.appex/Contents"
+extension_info = {
+    "CFBundleDevelopmentRegion": "en",
+    "CFBundleDisplayName": "Mountain Turtle Finder Status",
+    "CFBundleExecutable": "Mountain Turtle Finder",
+    "CFBundleIdentifier": "io.mountainturtle.app.findersync",
+    "CFBundleInfoDictionaryVersion": "6.0",
+    "CFBundleName": "Mountain Turtle Finder",
+    "CFBundlePackageType": "XPC!",
+    "CFBundleShortVersionString": info["CFBundleShortVersionString"],
+    "CFBundleVersion": info["CFBundleVersion"],
+    "LSMinimumSystemVersion": "14.0",
+    "LSUIElement": True,
+    "NSHighResolutionCapable": True,
+    "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
+    "NSExtension": {
+        "NSExtensionPointIdentifier": "com.apple.FinderSync",
+        "NSExtensionPrincipalClass": "MountainTurtleFinderSync",
+        "NSExtensionAttributes": {},
+    },
+}
+with (extension / "Info.plist").open("wb") as stream:
+    plistlib.dump(extension_info, stream, sort_keys=True)
+(extension / "PkgInfo").write_bytes(b"XPC!????")
 PY
 
+/usr/bin/codesign --force --sign - --timestamp=none \
+    --entitlements "$PROJECT_DIR/Sources/FinderSync/Entitlements.plist" "$EXTENSION_PATH"
 /usr/bin/codesign --force --sign - --timestamp=none "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"
