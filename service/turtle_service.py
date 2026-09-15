@@ -23,6 +23,11 @@ SERVICE = Path(__file__).resolve()
 CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+ICON_ASSETS = {
+    "VolumeIcon.icns": ".VolumeIcon.icns",
+    "root-finder-info.ad": "._.",
+    "volume-icon-finder-info.ad": "._.VolumeIcon.icns",
+}
 SIDEBAR_FALLBACK = ("The drive stays connected. In Finder, choose Go → Computer, select the drive, "
                     "then File → Add to Sidebar.")
 AUTH_ERRORS = re.compile(r"expiredtoken|token.{0,30}expir|sso.{0,50}(invalid|fail|expir)|"
@@ -256,12 +261,30 @@ def assert_disconnected(connection, runtime, mounts, paths):
         raise ValueError("Disconnect this drive before editing or removing it")
 
 
+def materialized_icon_overlay(paths):
+    assets = paths.resources / "icon-overlay-assets"
+    if not all((assets / name).is_file() for name in ICON_ASSETS):
+        return None
+    overlay = paths.base / "icon-overlay"
+    overlay.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for source_name, target_name in ICON_ASSETS.items():
+        source = assets / source_name
+        target = overlay / target_name
+        data = source.read_bytes()
+        if not target.exists() or target.read_bytes() != data:
+            temporary = target.with_name(target.name + f".{os.getpid()}.tmp")
+            temporary.write_bytes(data)
+            temporary.chmod(0o600)
+            temporary.replace(target)
+    return overlay if all((overlay / name).is_file() for name in ICON_ASSETS.values()) else None
+
+
 def connection_config(connection, paths):
     config = ("[s3]\ntype = s3\nprovider = AWS\nenv_auth = true\n"
               f'profile = {connection["profile"]}\nregion = {connection["region"]}\n'
               "no_check_bucket = true\ndirectory_markers = false\n")
-    overlay = paths.resources / "icon-overlay"
-    if all((overlay / name).is_file() for name in (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns")):
+    overlay = materialized_icon_overlay(paths)
+    if overlay:
         # The resource path is local application data. Quote without enabling a shell.
         quoted = str(overlay).replace("\\", "\\\\").replace('"', '\\"')
         config += (f'\n[volume]\ntype = union\nupstreams = "{quoted}:ro" s3:{connection["bucket"]}\n'

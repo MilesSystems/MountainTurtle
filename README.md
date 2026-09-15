@@ -76,6 +76,17 @@ The build creates `build/Mountain Turtle.app`; the install script places it in
 startup: the background service must keep a stable path to the app's resources.
 Python, rclone, and AWS CLI are external dependencies, not bundled executables.
 
+To build a drag-to-install disk image:
+
+```sh
+CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/package-dmg.sh
+```
+
+The DMG includes a Mountain Turtle background, the app, and an Applications
+shortcut. A free Apple Development certificate can sign local builds, but clean
+distribution outside your Mac requires Apple's Developer ID signing and
+notarization flow.
+
 For repeated development updates, set `CODE_SIGN_IDENTITY` to an existing Apple
 Development or Developer ID signing identity when building. Using the same
 identity lets macOS recognize subsequent updates. The default is ad hoc signing,

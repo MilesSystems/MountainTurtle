@@ -26,7 +26,7 @@ class BadgeTests(unittest.TestCase):
         self.connection = {"id": "connection-id", "name": "Photos", "mountPath": self.root,
                            "bucket": "private-bucket", "profile": "private-profile",
                            "state": "connected", "mounted": True}
-        overlay = self.paths.resources / "icon-overlay"
+        overlay = self.paths.base / "icon-overlay"
         overlay.mkdir(parents=True)
         for name in (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"):
             (overlay / name).touch()
@@ -149,7 +149,7 @@ class BadgeTests(unittest.TestCase):
 
     def test_s3_namespace_without_overlay_does_not_use_old_volume_cache(self):
         self.cache(self.complete())
-        (self.paths.resources / "icon-overlay/.VolumeIcon.icns").unlink()
+        (self.paths.base / "icon-overlay/.VolumeIcon.icns").unlink()
         self.assertEqual(self.state(), "online")
         self.cache(self.complete(), namespace="s3/" + self.connection["bucket"])
         self.assertEqual(self.state(), "cached")

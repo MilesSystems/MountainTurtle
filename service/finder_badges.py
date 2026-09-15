@@ -133,7 +133,7 @@ def badge_for_path(paths, connections, requested_path):
     try:
         identity = _component(connection["id"])
         bucket = _component(connection["bucket"])
-        overlay = paths.resources / "icon-overlay"
+        overlay = paths.base / "icon-overlay"
         uses_overlay = all((overlay / name).is_file() for name in
                            (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"))
         namespace = ["volume"] if uses_overlay else ["s3", bucket]

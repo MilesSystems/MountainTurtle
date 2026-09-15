@@ -59,7 +59,13 @@ The sibling `photo_browser.py` CLI is documented in [PHOTO_BROWSER.md](docs/PHOT
 
 All action commands return {"ok":true,"message":optional}. GUI polls status every 3 seconds. Backend paths: ~/Library/Application Support/Mountain Turtle, ~/Library/Caches/MountainTurtle, ~/Library/Logs/MountainTurtle. Mount root ~/Mountain Turtle; each display name must be unique and safe as one directory component. No mounts of unrelated buckets. No recursive S3 scans or object mutation during connect/validation. Rclone mounts bind127.0.0.1 with unprivileged native macOS NFS options.
 
-CLI accepts --resource-dir PATH before COMMAND to locate icon-overlay if present. Backend can locate its parent Resources by default. Bundled app resources include service/turtle_service.py and icon-overlay. Dependencies discovered from explicit standard paths + PATH. For app installation, LaunchAgent references the stable service script inside the installed .app, not build checkout.
+CLI accepts --resource-dir PATH before COMMAND to locate packaged icon overlay
+assets. Backend can locate its parent Resources by default. Bundled app
+resources include service/turtle_service.py and icon-overlay-assets; the service
+materializes the dotfile-shaped Finder metadata into its private Application
+Support directory at runtime. Dependencies discovered from explicit standard
+paths + PATH. For app installation, LaunchAgent references the stable service
+script inside the installed .app, not build checkout.
 
 ## First-run setup (0.3)
 

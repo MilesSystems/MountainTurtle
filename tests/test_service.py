@@ -338,6 +338,19 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("--vfs-refresh", command)
         self.assertNotIn("--vfs-used-is-size", command)
 
+    def test_icon_overlay_is_materialized_from_package_safe_assets(self):
+        assets = self.paths.resources / "icon-overlay-assets"
+        assets.mkdir(parents=True)
+        for source_name in turtle.ICON_ASSETS:
+            (assets / source_name).write_text(source_name)
+        overlay = turtle.materialized_icon_overlay(self.paths)
+        self.assertEqual(overlay, self.paths.base / "icon-overlay")
+        for source_name, target_name in turtle.ICON_ASSETS.items():
+            self.assertEqual((overlay / target_name).read_text(), source_name)
+        config, remote = turtle.connection_config(self.connection, self.paths)
+        self.assertEqual(remote, "volume:")
+        self.assertIn(str(overlay), config)
+
     def test_conservative_reads_disable_both_layers_of_prefetch(self):
         command = turtle.mount_command(self.connection, self.paths, "/rclone", "s3:photos")
         self.assertIn("readahead=0", command)
