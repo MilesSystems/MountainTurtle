@@ -22,6 +22,7 @@ LABEL = "com.mountainturtle.service"
 SERVICE = Path(__file__).resolve()
 CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
 SIDEBAR_PERMISSION_TIMEOUT = 60
+HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 SIDEBAR_FALLBACK = ("The drive stays connected. In Finder, choose Go → Computer, select the drive, "
                     "then File → Add to Sidebar.")
 AUTH_ERRORS = re.compile(r"expiredtoken|token.{0,30}expir|sso.{0,50}(invalid|fail|expir)|"
@@ -61,15 +62,74 @@ def write_json(path, value):
 
 def executable(name):
     candidates = {"rclone": ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone"),
-                  "aws": ("/usr/local/bin/aws", "/opt/homebrew/bin/aws")}.get(name, ())
+                  "aws": ("/usr/local/bin/aws", "/opt/homebrew/bin/aws"),
+                  "brew": ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")}.get(name, ())
     for candidate in (*candidates, shutil.which(name)):
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
 
 
-def dependencies():
-    return {"rclone": executable("rclone"), "aws": executable("aws"), "python": sys.executable}
+def checked_command(command, timeout=5):
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        return result.returncode == 0, output[:2000]
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+
+
+def application_path(paths):
+    resources = paths.resources
+    if resources.name == "Resources" and resources.parent.name == "Contents":
+        bundle = resources.parent.parent
+        if bundle.name.endswith(".app"):
+            return bundle
+    return None
+
+
+def installed_application(paths):
+    bundle = application_path(paths)
+    if not bundle:
+        return False
+    try:
+        bundle = bundle.resolve()
+        expected = [(paths.home / "Applications/Mountain Turtle.app").resolve(),
+                    Path("/Applications/Mountain Turtle.app").resolve()]
+    except OSError:
+        return False
+    return bundle in expected
+
+
+def privacy_status(runtime, mounted):
+    live_connections = runtime.values()
+    if any(item.get("sidebarItemID") for item in live_connections):
+        return {"privacyState": "approved", "privacyMessage": "Finder sidebar access is approved."}
+    for item in live_connections:
+        error = item.get("sidebarError", "")
+        if "Network Volumes" in error or "Files and Folders" in error or "Privacy & Security" in error:
+            return {"privacyState": "needsApproval", "privacyMessage": "Allow Network Volumes for Mountain Turtle in macOS Privacy & Security."}
+    if mounted:
+        return {"privacyState": "checking", "privacyMessage": "Mountain Turtle will confirm Finder access after the first mounted drive appears in Locations."}
+    return {"privacyState": "unknown", "privacyMessage": "macOS asks for Network Volumes access when Mountain Turtle first adds a drive to Finder."}
+
+
+def dependencies(paths=None, runtime=None, mounted=None):
+    brew, rclone, aws = executable("brew"), executable("rclone"), executable("aws")
+    aws_ok, aws_version = checked_command([aws, "--version"]) if aws else (False, "")
+    rclone_ok, rclone_version = checked_command([rclone, "version"]) if rclone else (False, "")
+    nfsmount_ok, _ = checked_command([rclone, "nfsmount", "--help"]) if rclone else (False, "")
+    rclone_first_line = rclone_version.splitlines()[0] if rclone_version else ""
+    result = {"rclone": rclone, "aws": aws, "python": sys.executable, "brew": brew,
+              "awsVersion": aws_version.splitlines()[0] if aws_version else "",
+              "awsCliV2": aws_ok and aws_version.lower().startswith("aws-cli/2"),
+              "rcloneVersion": rclone_first_line,
+              "rcloneNfsmount": rclone_ok and nfsmount_ok}
+    if paths:
+        app = application_path(paths)
+        result.update(appPath=str(app) if app else "", appInstalled=installed_application(paths))
+        result.update(privacy_status(runtime or {}, mounted or set()))
+    return result
 
 
 def profiles(paths):
@@ -716,7 +776,7 @@ def status(paths):
             item.update(state="connected", message="Drive remains attached; connect to resume supervision.")
         connections.append(item)
     return {"ok": True, "serviceRunning": running, "launchAtLogin": saved.get("launchAtLogin", False),
-            "dependencies": dependencies(), "profiles": profiles(paths), "connections": connections}
+            "dependencies": dependencies(paths, runtime, mounted), "profiles": profiles(paths), "connections": connections}
 
 
 def set_autostart(paths, enabled):

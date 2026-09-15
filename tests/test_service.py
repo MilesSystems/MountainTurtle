@@ -567,6 +567,51 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("not-a-real-token", json.dumps(result))
         self.assertNotIn("pid", result["connections"][0])
 
+    def test_dependencies_verify_aws_v2_rclone_nfsmount_and_privacy_state(self):
+        def fake_executable(name):
+            return {"aws": "/aws", "rclone": "/rclone", "brew": "/brew"}.get(name)
+
+        def fake_checked(command, timeout=5):
+            if command == ["/aws", "--version"]:
+                return True, "aws-cli/2.31.35 Python/3.13.9 Darwin/25.2.0 exe/arm64"
+            if command == ["/rclone", "version"]:
+                return True, "rclone v1.75.1\n- os/type: darwin"
+            if command == ["/rclone", "nfsmount", "--help"]:
+                return True, "Rclone nfsmount allows macOS to mount remotes."
+            return False, ""
+
+        with patch.object(turtle, "executable", side_effect=fake_executable), \
+             patch.object(turtle, "checked_command", side_effect=fake_checked), \
+             patch.object(turtle, "installed_application", return_value=True), \
+             patch.object(turtle, "application_path", return_value=Path("/Users/example/Applications/Mountain Turtle.app")):
+            result = turtle.dependencies(self.paths, {"a": {"sidebarItemID": 42}}, {"/Volumes/Nikki"})
+        self.assertTrue(result["awsCliV2"])
+        self.assertTrue(result["rcloneNfsmount"])
+        self.assertTrue(result["appInstalled"])
+        self.assertEqual(result["privacyState"], "approved")
+        self.assertEqual(result["awsVersion"].split()[0], "aws-cli/2.31.35")
+        self.assertEqual(result["rcloneVersion"], "rclone v1.75.1")
+
+    def test_dependencies_reject_aws_v1_and_missing_nfsmount(self):
+        def fake_executable(name):
+            return {"aws": "/aws", "rclone": "/rclone"}.get(name)
+
+        def fake_checked(command, timeout=5):
+            if command == ["/aws", "--version"]:
+                return True, "aws-cli/1.42.0 Python/3.11.0"
+            if command == ["/rclone", "version"]:
+                return True, "rclone v1.75.1"
+            if command == ["/rclone", "nfsmount", "--help"]:
+                return False, "unknown command"
+            return False, ""
+
+        with patch.object(turtle, "executable", side_effect=fake_executable), \
+             patch.object(turtle, "checked_command", side_effect=fake_checked):
+            result = turtle.dependencies(self.paths, {"a": {"sidebarError": "Allow Network Volumes"}}, set())
+        self.assertFalse(result["awsCliV2"])
+        self.assertFalse(result["rcloneNfsmount"])
+        self.assertEqual(result["privacyState"], "needsApproval")
+
     def test_sidebar_status_disappears_immediately_when_kernel_mount_is_gone(self):
         turtle.write_json(self.paths.base / "runtime.json", {"connections": {
             self.connection["id"]: {"state": "needsLogin", "sidebarItemID": 42,

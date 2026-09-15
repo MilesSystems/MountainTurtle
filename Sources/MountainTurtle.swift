@@ -52,6 +52,20 @@ struct Dependencies: Decodable {
     var rclone: String?
     var aws: String?
     var python: String?
+    var brew: String?
+    var awsVersion: String?
+    var awsCliV2: Bool?
+    var rcloneVersion: String?
+    var rcloneNfsmount: Bool?
+    var appPath: String?
+    var appInstalled: Bool?
+    var privacyState: String?
+    var privacyMessage: String?
+
+    var awsReady: Bool { awsCliV2 == true }
+    var rcloneReady: Bool { rcloneNfsmount == true }
+    var installedReady: Bool { appInstalled == true }
+    var privacyReady: Bool { privacyState == "approved" }
 }
 
 struct StatusResponse: Decodable {
@@ -92,6 +106,105 @@ enum ServiceClient {
 
     static var resources: URL {
         Bundle.main.resourceURL ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
+    }
+
+    static func installCurrentAppToApplications() throws -> URL {
+        let source = Bundle.main.bundleURL.standardizedFileURL
+        let applications = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+        let destination = applications.appendingPathComponent("Mountain Turtle.app", isDirectory: true).standardizedFileURL
+        if source.path == destination.path { return destination }
+        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let backup = applications.appendingPathComponent("Mountain Turtle.backup-\(stamp).app", isDirectory: true)
+            try FileManager.default.moveItem(at: destination, to: backup)
+        }
+        try FileManager.default.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    static func openPrivacySettings() {
+        let primary = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
+        if let primary, NSWorkspace.shared.open(primary) { return }
+        if let fallback = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            NSWorkspace.shared.open(fallback)
+        }
+    }
+
+    static func writeTerminalInstaller() throws -> URL {
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Mountain Turtle", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let script = support.appendingPathComponent("install-tools.sh")
+        let content = """
+        #!/bin/bash
+        set -euo pipefail
+        export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if ! command -v brew >/dev/null 2>&1; then
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          if [ -x /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+          elif [ -x /usr/local/bin/brew ]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+          fi
+        fi
+        brew install awscli rclone
+        echo
+        echo "Mountain Turtle tools are installed. Return to Mountain Turtle and refresh setup."
+        read -r -p "Press Return to close this window. "
+        """
+        try content.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        return script
+    }
+
+    static func openTerminalInstaller() throws {
+        let script = try writeTerminalInstaller()
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: configuration)
+    }
+
+    static func installToolsWithHomebrew(progress: @escaping @Sendable (String) -> Void) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let output = Pipe()
+                let command = """
+                export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                brew install awscli rclone
+                """
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-lc", command]
+                process.standardOutput = output
+                process.standardError = output
+                let lock = NSLock()
+                var finished = false
+                func finish(_ result: Result<Void, Error>) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !finished else { return }
+                    finished = true
+                    output.fileHandleForReading.readabilityHandler = nil
+                    switch result {
+                    case .success: continuation.resume(returning: ())
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+                output.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                    progress(text)
+                }
+                process.terminationHandler = { proc in
+                    if proc.terminationStatus == 0 { finish(.success(())) }
+                    else { finish(.failure(TurtleError(message: "Homebrew could not install AWS CLI and rclone. Open the Terminal installer and try again."))) }
+                }
+                do { try process.run() }
+                catch { finish(.failure(error)) }
+            }
+        }
     }
 
     static func run(_ arguments: [String]) async throws -> Data {
@@ -146,6 +259,10 @@ enum ServiceClient {
     var selected: Connection? { connections.first { $0.id == selectedID } }
     var connectedCount: Int { connections.filter(\.isConnected).count }
     var missingTools: Bool { !isLoading && (dependencies.aws == nil || dependencies.rclone == nil) }
+    var setupNeedsAttention: Bool {
+        !isLoading && serviceError == nil && (!dependencies.installedReady || !dependencies.awsReady
+            || !dependencies.rcloneReady || dependencies.privacyState == "needsApproval")
+    }
 
     func start() {
         guard timer == nil else { return }
@@ -303,8 +420,10 @@ struct BrandIcon: View {
 struct MainView: View {
     @ObservedObject var model: AppModel
     @State private var showAdd = false
+    @State private var showSetup = false
     @State private var editing: Connection?
     @State private var removing: Connection?
+    @AppStorage("setupPanelSeenVersion") private var setupPanelSeenVersion = ""
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -315,7 +434,10 @@ struct MainView: View {
                 HStack {
                     Text("Your S3 drives").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    Text("PREVIEW 0.2").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
+                    Text("PREVIEW 0.3").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
+                    Button { showSetup = true } label: {
+                        Image(systemName: model.setupNeedsAttention ? "wrench.and.screwdriver.fill" : "checkmark.seal")
+                    }.buttonStyle(.plain).help("Setup checklist").padding(.leading, 10)
                     Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.plain).help("Refresh connection status").padding(.leading, 10)
                 }.padding(.horizontal, 32).padding(.vertical, 24)
@@ -328,7 +450,7 @@ struct MainView: View {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("A little setup first").fontWeight(.semibold)
                             Text("Install AWS CLI and rclone to connect your S3 buckets.").foregroundStyle(.secondary)
-                            Button("Open setup guide") { model.openGuide() }.buttonStyle(.link)
+                            Button("Open setup") { showSetup = true }.buttonStyle(.link)
                         }
                     }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(cream).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 32)
                 }
@@ -339,6 +461,7 @@ struct MainView: View {
         .frame(minWidth: 900, minHeight: 610)
         .tint(moss)
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
+        .sheet(isPresented: $showSetup) { SetupView(model: model) }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
         .sheet(item: $model.drivePanel) { panel in
             switch panel.kind {
@@ -358,6 +481,11 @@ struct MainView: View {
             }
         } message: { Text("This removes the connection from Mountain Turtle. Files in the S3 bucket stay where they are.") }
         .onReceive(NotificationCenter.default.publisher(for: .showTurtleWindow)) { _ in openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        .onChange(of: model.setupNeedsAttention) { _, needsAttention in
+            guard needsAttention, setupPanelSeenVersion != "0.3.0" else { return }
+            setupPanelSeenVersion = "0.3.0"
+            showSetup = true
+        }
         .onAppear { model.start() }
     }
 
@@ -551,6 +679,165 @@ struct MainView: View {
             Image(systemName: symbol).foregroundStyle(color)
             Text(text).font(.system(size: 12)).lineSpacing(3).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
         }.padding(14).background(color.opacity(0.07)).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private enum SetupState {
+    case ready, waiting, problem
+
+    var symbol: String {
+        switch self {
+        case .ready: return "checkmark.circle.fill"
+        case .waiting: return "clock"
+        case .problem: return "exclamationmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ready: return moss
+        case .waiting: return .secondary
+        case .problem: return .orange
+        }
+    }
+}
+
+struct SetupView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var installing = false
+    @State private var installLog = ""
+    @State private var message: String?
+
+    private var needsToolInstall: Bool {
+        !model.dependencies.awsReady || !model.dependencies.rcloneReady
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 13) {
+                BrandIcon(size: 52)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Mac setup").font(.system(size: 23, weight: .semibold))
+                    Text("Mountain Turtle checks the tools it needs before connecting drives.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+            }
+            VStack(spacing: 0) {
+                setupRow("Mountain Turtle in Applications",
+                         detail: model.dependencies.installedReady ? (model.dependencies.appPath ?? "Installed") : "Move the app into your Applications folder before using login restore.",
+                         state: model.dependencies.installedReady ? .ready : .problem)
+                Divider().padding(.leading, 42)
+                setupRow("AWS CLI v2",
+                         detail: model.dependencies.awsReady ? (model.dependencies.awsVersion ?? "Installed") : "Needed for AWS profiles, SSO, and bucket access.",
+                         state: model.dependencies.awsReady ? .ready : .problem)
+                Divider().padding(.leading, 42)
+                setupRow("rclone NFS mounts",
+                         detail: model.dependencies.rcloneReady ? (model.dependencies.rcloneVersion ?? "Installed") : "Needed to show S3 as a macOS network volume.",
+                         state: model.dependencies.rcloneReady ? .ready : .problem)
+                Divider().padding(.leading, 42)
+                setupRow("Finder Network Volumes",
+                         detail: model.dependencies.privacyMessage ?? "macOS asks the first time a drive is added to Finder.",
+                         state: privacyState)
+            }.padding(.horizontal, 16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 16))
+            HStack(spacing: 10) {
+                if !model.dependencies.installedReady {
+                    Button { installApp() } label: { Label("Move to Applications", systemImage: "square.and.arrow.down") }
+                }
+                if needsToolInstall {
+                    Button { installTools() } label: {
+                        Label(model.dependencies.brew == nil ? "Install Homebrew & tools" : "Install tools", systemImage: "shippingbox")
+                    }.buttonStyle(.borderedProminent).disabled(installing)
+                }
+                Button { ServiceClient.openPrivacySettings() } label: { Label("Open Privacy Settings", systemImage: "lock.shield") }
+                Spacer()
+                Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+            }.controlSize(.large)
+            if installing {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Installing with Homebrew...")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+            }
+            if let message {
+                Label(message, systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !installLog.isEmpty {
+                ScrollView {
+                    Text(installLog).font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(height: 140).padding(10).background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            HStack {
+                Button("Setup guide") { model.openGuide() }
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(28).frame(width: 640).tint(moss)
+    }
+
+    private var privacyState: SetupState {
+        switch model.dependencies.privacyState {
+        case "approved": return .ready
+        case "needsApproval": return .problem
+        default: return .waiting
+        }
+    }
+
+    private func setupRow(_ title: String, detail: String, state: SetupState) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: state.symbol).frame(width: 18).foregroundStyle(state.color)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+            Spacer()
+        }.padding(.vertical, 13)
+    }
+
+    private func installApp() {
+        do {
+            let destination = try ServiceClient.installCurrentAppToApplications()
+            message = "Mountain Turtle was copied to Applications. The installed app will open now."
+            NSWorkspace.shared.open(destination)
+            NSApp.terminate(nil)
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    private func installTools() {
+        message = nil
+        installLog = ""
+        if model.dependencies.brew == nil {
+            do {
+                try ServiceClient.openTerminalInstaller()
+                message = "The installer is open in Terminal because Homebrew may need your Mac password. Return here and refresh when it finishes."
+            } catch {
+                message = error.localizedDescription
+            }
+            return
+        }
+        installing = true
+        Task {
+            do {
+                try await ServiceClient.installToolsWithHomebrew { text in
+                    Task { @MainActor in
+                        installLog += text
+                        if installLog.count > 8000 { installLog = String(installLog.suffix(8000)) }
+                    }
+                }
+                await model.refresh()
+                message = "AWS CLI and rclone are installed."
+            } catch {
+                message = error.localizedDescription
+            }
+            installing = false
+        }
     }
 }
 

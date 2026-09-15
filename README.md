@@ -34,6 +34,33 @@ required. The NFS listener binds to `127.0.0.1` and is for this Mac, not a netwo
 file server for other computers. Upstream still labels `nfsmount` experimental.
 See [rclone's macOS NFS documentation](https://rclone.org/commands/rclone_nfsmount/#nfs-mount).
 
+On first launch, Mountain Turtle shows a setup checklist for the installed app
+location, AWS CLI v2, rclone's `nfsmount` support, and macOS Network Volumes
+permission. If Homebrew is already installed, the app can install `awscli` and
+`rclone` with Homebrew. If Homebrew is missing, Mountain Turtle opens a visible
+Terminal installer that runs Homebrew's official install script and then installs
+the required packages.
+
+## Backend support
+
+This release focuses on Amazon S3. Since rclone's `nfsmount` can mount rclone
+storage systems through the same local NFS layer, the next easiest backends are
+the ones with simple credentials and file-like semantics:
+
+- S3-compatible storage: AWS S3, Cloudflare R2, Backblaze B2 through S3, Wasabi,
+  DigitalOcean Spaces, MinIO, and similar providers.
+- SFTP and WebDAV: straightforward account fields, good fit for a simple
+  connection editor, and useful for self-hosted servers.
+- FTP: technically easy, but best treated as legacy and read-only by default.
+- Backblaze B2, Azure Blob, Google Cloud Storage, Dropbox, Google Drive,
+  OneDrive, and Box: feasible through rclone, but each needs more careful account
+  linking, token storage, naming, and support copy before it feels native.
+
+Specialized photo or consumer backends such as Google Photos and iCloud Drive can
+have API limits or semantics that do not behave like a normal writable filesystem,
+so they should be evaluated separately before appearing as first-class drive
+types.
+
 ## Build and install
 
 From this checkout:
