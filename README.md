@@ -82,8 +82,9 @@ To build a drag-to-install disk image:
 CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/package-dmg.sh
 ```
 
-The DMG includes a Mountain Turtle background, the app, and an Applications
-shortcut. A free Apple Development certificate can sign local builds, but clean
+The DMG uses the committed Mountain Turtle installer artwork in
+`Resources/dmg-background.png` and includes the app plus an Applications shortcut.
+A free Apple Development certificate can sign local builds, but clean
 distribution outside your Mac requires Apple's Developer ID signing and
 notarization flow.
 
