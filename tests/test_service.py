@@ -197,7 +197,7 @@ class ServiceTests(unittest.TestCase):
         process.terminate.assert_called_once()
         child.terminate.assert_not_called()
         self.assertFalse(supervisor.sidebar_processes)
-        self.assertIn("pending S3 uploads", supervisor.runtime[self.connection["id"]]["message"])
+        self.assertIn("pending uploads", supervisor.runtime[self.connection["id"]]["message"])
 
     def test_sidebar_partial_success_preserves_item_and_reports_warning(self):
         supervisor, child, process = self.sidebar_fixture()
@@ -246,7 +246,7 @@ class ServiceTests(unittest.TestCase):
             supervisor.tick()
         start.assert_not_called()
         child.terminate.assert_not_called()
-        self.assertIn("pending S3 uploads", supervisor.runtime[self.connection["id"]]["message"])
+        self.assertIn("pending uploads", supervisor.runtime[self.connection["id"]]["message"])
 
     def test_incomplete_cache_metadata_is_not_upload_completion_proof(self):
         path = self.cache_metadata('{"Dirty":')
@@ -517,6 +517,7 @@ class ServiceTests(unittest.TestCase):
         supervisor = turtle.Supervisor(self.paths)
         with patch.object(turtle, "dependencies", return_value={"rclone": "/rclone"}), \
              patch.object(turtle.subprocess, "Popen", return_value=process), \
+             patch.object(turtle, "remote_control_settings", return_value={"rcPort": 42000, "rcUser": "metrics", "rcPass": "private", "sessionID": "session"}), \
              patch.object(turtle.time, "time", return_value=started):
             supervisor.start_mount(connection)
         expected = dict(before, lastMountAt=started)
@@ -681,7 +682,7 @@ class ServiceTests(unittest.TestCase):
         with patch.object(turtle, "mount_table", return_value=set()):
             supervisor.tick()
         child.terminate.assert_not_called()
-        self.assertIn("pending S3 uploads", supervisor.runtime[self.connection["id"]]["message"])
+        self.assertIn("pending uploads", supervisor.runtime[self.connection["id"]]["message"])
 
     def test_login_uses_device_authorization_for_the_selected_profile(self):
         with patch.object(turtle, "executable", return_value="/aws"), \

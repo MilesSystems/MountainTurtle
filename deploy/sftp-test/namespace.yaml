@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mountain-turtle-test
+  labels:
+    app.kubernetes.io/part-of: mountain-turtle
+    app.kubernetes.io/component: sftp-test

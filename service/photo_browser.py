@@ -186,6 +186,8 @@ def render_thumbnail(source, destination, pixels):
 
 class PhotoBrowser:
     def __init__(self, connection, paths, reader=None, renderer=render_thumbnail):
+        if connection.get("backend", "s3") != "s3":
+            raise BrowserError("The photo browser is available for S3 drives. Open this SFTP drive in Finder to browse its files.")
         self.connection, self.paths = connection, paths
         self.reader = reader or AWSReader(connection, paths)
         self.renderer = renderer

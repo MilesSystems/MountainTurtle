@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 struct DrivePanel: Identifiable {
-    enum Kind { case settings, rename, photos }
+    enum Kind { case settings, rename, photos, metrics }
     let id = UUID()
     var connection: Connection
     var kind: Kind
@@ -30,7 +30,7 @@ struct RenameDriveView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Label("Rename drive", systemImage: "externaldrive").font(.title2.weight(.semibold))
-            Text("This is the name you see on your Mac. The S3 bucket keeps its name.")
+            Text("This is the name you see on your Mac. Remote files keep their names.")
                 .font(.callout).foregroundStyle(.secondary)
             TextField("Drive name", text: $name).textFieldStyle(.roundedBorder)
             if connection.isMounted || connection.desiredConnected {
@@ -81,7 +81,7 @@ struct DriveSettingsView: View {
                 Label("Small reads, no read-ahead", systemImage: "leaf").fontWeight(.medium)
                 Text("Files are fetched when an app reads them. Finder’s thumbnails and Preview pane can read original photos, including photos outside the visible area.")
                     .font(.callout).foregroundStyle(.secondary)
-                Text("For fewer downloads, use Browse photos here. In Finder, turn off Show icon preview (⌘J) and hide the Preview pane.")
+                Text(connection.supportsPhotoBrowser ? "For fewer downloads, use Browse photos here. In Finder, turn off Show icon preview (⌘J) and hide the Preview pane." : "For fewer downloads in Finder, turn off Show icon preview (⌘J) and hide the Preview pane.")
                     .font(.callout).foregroundStyle(.secondary)
             }.padding(16).background(cream).clipShape(RoundedRectangle(cornerRadius: 12))
             Form {
@@ -94,7 +94,7 @@ struct DriveSettingsView: View {
                     ForEach(ages, id: \.self) { age in Text(age == 1 ? "1 hour" : age < 24 ? "\(age) hours" : "\(age / 24) day\(age == 24 ? "" : "s")").tag(age) }
                 }
             }
-            Text("These are cache targets, not a download allowance. Files in use or waiting to upload are kept. The photo browser has a separate 256 MB thumbnail cache.")
+            Text("These are cache targets, not a download allowance. Files in use or waiting to upload are kept." + (connection.supportsPhotoBrowser ? " The photo browser has a separate 256 MB thumbnail cache." : ""))
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
@@ -126,7 +126,7 @@ struct DriveSettingsView: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Clear local cache", role: .destructive) { apply(clear: true) }
             } message: {
-                Text("The drive will safely eject and reconnect. S3 originals stay in the bucket. Open files or pending uploads can prevent clearing. Finder may download previews again when you reopen a folder.")
+                Text("The drive will safely eject and reconnect. Original files stay on your connected storage. Open files or pending uploads can prevent clearing. Finder may download previews again when you reopen a folder.")
             }
     }
 

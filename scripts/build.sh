@@ -65,6 +65,11 @@ mkdir -p -- "$(dirname -- "$HELPER_PATH")"
     -Wno-deprecated-declarations -framework Foundation -framework CoreServices \
     "$PROJECT_DIR/Sources/SidebarMounts/main.m" -o "$HELPER_PATH"
 
+CREDENTIALS_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Credentials"
+/usr/bin/xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx14.0" \
+    -framework Foundation -framework Security \
+    "$PROJECT_DIR/Sources/Credentials/main.swift" -o "$CREDENTIALS_PATH"
+
 "$PYTHON_BIN" - "$PROJECT_DIR" "$APP_PATH" <<'PY'
 from pathlib import Path
 import os
@@ -101,8 +106,8 @@ info = {
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleName": "Mountain Turtle",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.3.0",
-    "CFBundleVersion": "0.3.0",
+    "CFBundleShortVersionString": "0.4.0",
+    "CFBundleVersion": "0.4.0",
     "CFBundleURLTypes": [{"CFBundleURLName": "io.mountainturtle.app.actions",
                           "CFBundleURLSchemes": ["mountainturtle"],
                           "CFBundleTypeRole": "Viewer"}],
@@ -111,7 +116,7 @@ info = {
     "LSMinimumSystemVersion": "14.0",
     "LSUIElement": False,
     "NSHighResolutionCapable": True,
-    "NSNetworkVolumesUsageDescription": "Mountain Turtle accesses your connected S3 drives to show them directly in Finder's sidebar.",
+    "NSNetworkVolumesUsageDescription": "Mountain Turtle accesses your connected drives to show them directly in Finder's sidebar.",
     "NSPrincipalClass": "NSApplication",
     "NSHumanReadableCopyright": "Copyright © 2026 Mountain Turtle contributors. MIT License.",
 }
@@ -148,6 +153,7 @@ PY
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none \
     --entitlements "$PROJECT_DIR/Sources/FinderSync/Entitlements.plist" "$EXTENSION_PATH"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$HELPER_PATH"
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$CREDENTIALS_PATH"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"

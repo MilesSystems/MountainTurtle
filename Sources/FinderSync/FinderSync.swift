@@ -4,7 +4,7 @@ import FinderSync
 import os
 
 // The extension only asks the local service about items Finder has displayed.
-// It never opens the network volume or holds AWS credentials.
+// It never opens the network volume or holds server credentials.
 private struct Bridge: Decodable {
     let version: Int
     let url: String
@@ -29,6 +29,7 @@ private struct Root: Decodable {
     let mountPath: String
     let state: String
     let mounted: Bool
+    let supportsPhotoBrowser: Bool?
 }
 
 private struct RootsResponse: Decodable { let version: Int; let roots: [Root] }
@@ -191,7 +192,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     override var toolbarItemName: String { "Mountain Turtle" }
 
     override var toolbarItemToolTip: String {
-        "Browse photos, manage the drive, and check local cache status."
+        "Manage the drive and check local cache status."
     }
 
     override var toolbarItemImage: NSImage {
@@ -229,7 +230,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 menu.addItem(status)
             }
             menu.addItem(.separator())
-            addAction("Browse photos…", symbol: "photo.on.rectangle", action: "browse", root: root, to: menu)
+            if root.supportsPhotoBrowser ?? true {
+                addAction("Browse photos…", symbol: "photo.on.rectangle", action: "browse", root: root, to: menu)
+            }
             addAction("Show drive in Finder", symbol: "folder", action: "finder", root: root, to: menu,
                       enabled: root.mounted)
             addAction("Refresh drive", symbol: "arrow.clockwise", action: "refresh", root: root, to: menu,
@@ -237,6 +240,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
             addAction(root.mounted ? "Reconnect drive" : "Connect drive", symbol: "bolt.horizontal",
                       action: "reconnect", root: root, to: menu)
             menu.addItem(.separator())
+            addAction("Drive insights…", symbol: "chart.xyaxis.line", action: "metrics", root: root, to: menu)
             addAction("Cache settings…", symbol: "internaldrive", action: "settings", root: root, to: menu)
             addAction("Rename drive…", symbol: "pencil", action: "rename", root: root, to: menu)
             if root.mounted {

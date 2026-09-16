@@ -1,22 +1,26 @@
 # Mountain Turtle
 
 Mountain Turtle is a free, MIT-licensed macOS app that connects Amazon S3 buckets
-as real Finder network volumes. Its native SwiftUI window manages saved
-connections, AWS SSO sign-in, connection status, and reconnecting at login. A
-small local Python service supervises rclone's NFS mounts.
+and SFTP servers as real Finder network volumes. Its native SwiftUI window manages
+saved connections, authentication, reconnecting at login, transfer and cache
+charts, and S3 storage and cost estimates. A small local Python service supervises
+rclone's NFS mounts.
 
-This is an early release focused on macOS and Amazon S3. The interface and app
-artwork are original project work. Mountain Duck's code and artwork are not used
-or bundled. There is no subscription or license activation; AWS storage,
-requests, and data transfer remain subject to your AWS account's charges.
+This is an early macOS release. The interface and app artwork are original
+project work; Mountain Duck's code and artwork are not used or bundled. There is
+no subscription or license activation. Remote storage providers can still charge
+for storage, requests, and data transfer.
 
 ## Requirements
 
 - macOS 14 or later.
 - Python 3.9 or later, installed separately; the service uses only its standard library.
 - [rclone](https://rclone.org/install/) with the `nfsmount` command.
-- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-  and an AWS profile with access to the bucket you want to connect.
+- **For S3 only:** [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+  and an AWS profile with access to the bucket. S3 storage metrics also need
+  `cloudwatch:GetMetricData` permission.
+- **For SFTP:** a server account, a verified server key in a local known-hosts
+  file, and an SSH agent key, private key file, or password.
 - Apple's Xcode Command Line Tools to build from source (`xcode-select --install`).
 
 Check the tools before building:
@@ -25,7 +29,7 @@ Check the tools before building:
 python3 --version
 rclone version
 rclone nfsmount --help
-aws --version
+aws --version # S3 only
 xcrun swiftc --version
 ```
 
@@ -35,31 +39,21 @@ file server for other computers. Upstream still labels `nfsmount` experimental.
 See [rclone's macOS NFS documentation](https://rclone.org/commands/rclone_nfsmount/#nfs-mount).
 
 On first launch, Mountain Turtle shows a setup checklist for the installed app
-location, AWS CLI v2, rclone's `nfsmount` support, and macOS Network Volumes
-permission. If Homebrew is already installed, the app can install `awscli` and
-`rclone` with Homebrew. If Homebrew is missing, Mountain Turtle opens a visible
+location, rclone's `nfsmount` support, and macOS Network Volumes
+permission. AWS CLI is optional for SFTP-only use. If Homebrew is already
+installed, the app can install `rclone` and optionally `awscli`. If Homebrew is missing, Mountain Turtle opens a visible
 Terminal installer that runs Homebrew's official install script and then installs
 the required packages.
 
 ## Backend support
 
-This release focuses on Amazon S3. Since rclone's `nfsmount` can mount rclone
-storage systems through the same local NFS layer, the next easiest backends are
-the ones with simple credentials and file-like semantics:
+| Connection type | Authentication | Finder and local metrics | Cloud storage and cost | Photo browser |
+| --- | --- | --- | --- | --- |
+| Amazon S3 | Saved AWS profile, including SSO | Yes | Daily CloudWatch totals and public AWS storage-price estimates | Yes |
+| SFTP | SSH agent, private key file, or Keychain password | Yes | Server filesystem capacity where supported; no inferred price | Browse files in Finder |
 
-- S3-compatible storage: AWS S3, Cloudflare R2, Backblaze B2 through S3, Wasabi,
-  DigitalOcean Spaces, MinIO, and similar providers.
-- SFTP and WebDAV: straightforward account fields, good fit for a simple
-  connection editor, and useful for self-hosted servers.
-- FTP: technically easy, but best treated as legacy and read-only by default.
-- Backblaze B2, Azure Blob, Google Cloud Storage, Dropbox, Google Drive,
-  OneDrive, and Box: feasible through rclone, but each needs more careful account
-  linking, token storage, naming, and support copy before it feels native.
-
-Specialized photo or consumer backends such as Google Photos and iCloud Drive can
-have API limits or semantics that do not behave like a normal writable filesystem,
-so they should be evaluated separately before appearing as first-class drive
-types.
+Other rclone backends and custom S3-compatible endpoints are not exposed by this
+release's connection editor.
 
 ## Build and install
 
@@ -74,7 +68,9 @@ open "$HOME/Applications/Mountain Turtle.app"
 The build creates `build/Mountain Turtle.app`; the install script places it in
 `~/Applications/Mountain Turtle.app`. Use the installed copy when enabling login
 startup: the background service must keep a stable path to the app's resources.
-Python, rclone, and AWS CLI are external dependencies, not bundled executables.
+Python and rclone are external dependencies, not bundled executables. AWS CLI
+is also external and is required only for S3. The build bundles the native
+Keychain and Finder-sidebar helpers.
 
 To build a drag-to-install disk image:
 
@@ -101,7 +97,7 @@ For a temporary development launch after building:
 open "build/Mountain Turtle.app"
 ```
 
-## Connect a bucket
+## Connect an S3 bucket
 
 1. Configure your AWS profile if needed. For SSO, follow the
    [AWS IAM Identity Center setup](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html).
@@ -114,11 +110,42 @@ open "build/Mountain Turtle.app"
 5. To reconnect after restarting the Mac, enable login startup and the individual
    connection's automatic connection setting.
 
+## Connect an SFTP server
+
+1. Connect with SSH/SFTP first and verify the server fingerprint with its
+   administrator. Save that verified host key in a local known-hosts file.
+   Mountain Turtle rejects unknown or changed keys; it does not automatically
+   trust a server.
+2. Choose **Add connection → SFTP server**. Enter a drive name, server hostname
+   or IP address, SSH username, and port (default `22`). Do not include `sftp://`
+   or a port in the server field.
+3. Leave **Remote folder** blank for the server home folder, or enter an absolute
+   path or a path relative to that home folder. `~`, parent traversal (`..`), and
+   control characters are rejected.
+4. Choose **SSH agent**, **Private key file**, or **Password**. Load an encrypted
+   key into the SSH agent first and use agent authentication. Passwords are saved
+   in macOS Keychain; leaving the password blank keeps it when the server, username,
+   and port are unchanged. Changing those fields requires a new password. Use the built app for password authentication.
+5. Choose the verified **Known hosts** file (default `~/.ssh/known_hosts`) and,
+   when applicable, the private key file. Keep **Read only** enabled initially,
+   save, connect, and open the drive in Finder.
+
+Key files and known-hosts files must already exist and be readable. Agent
+connections require an available SSH agent containing the unlocked key when
+connecting or restoring at login. SFTP mounts use SFTP operations without remote
+shell/hash commands; an SFTP-only account is supported.
+
+The dedicated [Harvester SFTP test drive](deploy/sftp-test/README.md) documents a
+LAN fixture, its verified host key, disposable write checks, and recorded live
+verification. It is not required for ordinary server connections.
+
+## Finder volumes and login restore
+
 Connected volumes live under `~/Mountain Turtle/<connection name>` and are
 actual NFS mounts. In Finder Settings, enable **Connected servers** under General
 for desktop icons and under Sidebar for the sidebar's Locations section.
 Custom volume artwork is provided locally; it does not require uploading an icon
-to your bucket.
+to your remote storage.
 
 Mountain Turtle registers each mounted drive directly under Finder's Locations,
 with its own eject button, and refreshes that entry after reconnecting or renaming.
@@ -132,7 +159,7 @@ Computer**, select the actual Turtle volume, then **File → Add to Sidebar**.
 The isolated native helper uses Apple's public SharedFileList compatibility API,
 which is deprecated and may require adaptation on future macOS versions.
 
-Startup happens after you sign in to macOS. It cannot bypass an expired AWS SSO
+Startup happens after you sign in to macOS. For S3, it cannot bypass an expired AWS SSO
 session: use **Sign in to AWS** or
 `aws sso login --use-device-code --profile PROFILE` when renewal is required.
 The app uses AWS device authorization: approve the request on the AWS page and
@@ -157,12 +184,12 @@ you browse inside a connected Mountain Turtle volume.
 | Unknown | Status is unavailable or cannot be established safely. |
 
 Cached files can be evicted when the cache fills. A green check does not pin a
-file for permanent offline access or establish that the cloud copy has not
+file for permanent offline access or establish that the remote copy has not
 changed. The extension requests status for visible items using local cache
-metadata; it does not scan the bucket or download photos to generate badges.
+metadata; it does not scan remote storage or download photos to generate badges.
 
-The Turtle toolbar button and contextual menu provide **Browse photos**,
-**Show drive in Finder**, **Refresh folder listings**, **Reconnect**,
+The Turtle toolbar button and contextual menu provide **Browse photos** for S3,
+**Show drive in Finder**, **Refresh folder listings**, **Reconnect**, **Drive insights**,
 **Download & cache settings**, **Rename drive**, and **Eject**. If the toolbar
 button is hidden, right-click Finder's toolbar, choose **Customize Toolbar**,
 and add Mountain Turtle. Rename and cache changes safely eject and reconnect
@@ -172,7 +199,7 @@ when needed; busy files or pending uploads can prevent the change.
 
 File contents are fetched on demand and cached on this Mac. A connected volume
 is not a complete offline copy, and Finder previews can trigger downloads.
-Cloud latency and the AWS session still matter for files that are not cached.
+Remote latency and valid server credentials still matter for files that are not cached.
 
 The default original-file cache target is 2 GiB, with removal after 24 hours
 without access. Both values are configurable per drive. Memory buffering,
@@ -181,26 +208,61 @@ Sequential reads use chunks no larger than 1 MiB. These settings reduce extra
 reads, but cannot stop Finder from explicitly reading originals for previews.
 Cache size and age are eviction targets, not a cap on total downloads; open or
 dirty files may remain beyond the targets. **Clear cache** only removes safe
-local cached copies after ejection, never S3 objects or pending uploads.
+local cached copies after ejection, never remote files or pending uploads.
 
 To reduce Finder downloads, turn off **Show icon preview** in View Options
 (⌘J) and hide the Preview pane. Finder cannot distinguish a preview read from
 an application opening the original through this NFS mount.
 
-Read-only connections block cloud edits. If you explicitly enable writing,
-normal file actions can upload, overwrite, rename, or delete S3 objects using
-your profile's permissions. Cached writes and error handling are covered with
-local mocks during initial validation; that is not proof of successful live
-upload or recovery behavior.
+Read-only connections block remote edits. If you explicitly enable writing,
+normal file actions can upload, overwrite, rename, or delete remote files using
+the saved account's permissions. The isolated SFTP fixture has separate live
+write verification; its results do not establish write durability for every
+server or S3 bucket.
 
 Disconnect through the app or eject the volume in Finder. If a volume is busy,
 close the files or applications using it and try again. Mountain Turtle does not
 force-detach a busy volume or discard its cache. Removing a disconnected saved
-connection removes its local configuration, not its bucket or objects.
+connection removes its local configuration and attempts to remove its saved
+Keychain password; it does not delete remote files.
+
+## Drive insights: graphs, storage, and cost
+
+Choose **View metrics** on a drive, or **Drive insights** in Finder's Turtle menu.
+The dashboard shows current-session transferred bytes, current and average
+speed, completed transfers, errors, local cache usage, and queued uploads, with
+throughput, cache, and upload-queue graphs. Read and write traffic are combined.
+Samples refresh every five seconds while the dashboard is open; up to 720 local
+samples from the last 24 hours are retained. Missing readings stay unknown.
+
+For S3, the dashboard also shows daily CloudWatch storage and object totals,
+30-day histories, and storage-class breakdowns. These load independently of the
+mount. Cloud storage refreshes on opening and when **Refresh storage** is chosen;
+there is no recurring cloud poll or recursive bucket scan. Partial, old, missing,
+and unauthorized data are labeled separately from zero storage.
+
+Monthly storage cost is estimated automatically using the bucket region's
+public AWS storage prices for explicitly supported classes. The pricing source
+and assumptions are shown. If any nonzero class cannot be priced, the dashboard
+keeps the total unknown and labels any priced subtotal. An optional blended
+USD/GiB/month rate is saved per drive and overrides automatic pricing locally.
+The 12-month graph applies a chosen storage-change assumption to the selected
+estimate. These are storage estimates and scenarios, not billed spend; requests,
+transfer, retrieval, and other charges are excluded.
+
+For SFTP, **Remote server storage** requests total, used, and free filesystem
+capacity from the server's SFTP statistics extension, with a usage breakdown and
+observed history. Unsupported servers are labeled; no recursive scan or remote
+shell fallback is used. These numbers can include other folders and users on the
+same filesystem, so they are not the selected folder's size. SFTP does not expose
+a provider price or bill, and Mountain Turtle does not invent one.
+
+See [metrics details and pricing assumptions](docs/METRICS.md).
 
 ## Large photo libraries
 
-This version connects an ordinary bucket directory tree. It does **not** make a
+The **S3-only** photo browser works with an ordinary bucket directory tree.
+SFTP photos open through Finder. It does **not** make a
 flat folder containing a million photos fast to open: directory enumeration and
 Finder thumbnail requests can still be expensive. Use existing smaller folders
 when available. There is no automatic bucket scan, thumbnail index, or photo-key
@@ -233,7 +295,10 @@ does not change the bucket tree or replace Finder's built-in JPEG previews.
 | `~/Library/Logs/MountainTurtle` | Service and connection logs |
 | `~/Mountain Turtle` | Volume mount points |
 
-If a connection needs sign-in, renew the named AWS profile. If a dependency is
+For an S3 sign-in error, renew the named AWS profile. For SFTP, check the saved
+server identity, credentials, and SSH agent or Keychain availability. Never
+remove a host-verification failure by automatically trusting an unknown key.
+If a dependency is
 missing, install it and reopen the app. If Finder waits on a very large folder,
 return to a smaller existing prefix rather than repeatedly reopening it. If
 ejection fails, close the apps holding files open; do not delete the mount
@@ -248,7 +313,7 @@ python3 service/turtle_service.py status
 The local CLI emits one JSON response and does not print credentials. The full
 interface is in [PROTOCOL.md](PROTOCOL.md). The
 [manual acceptance checklist](docs/ACCEPTANCE.md) separates mocked checks from
-read-only verification against a real bucket. The
+read-only S3 checks and deliberate writes to the isolated SFTP fixture. The
 [2026-09-14 verification record](docs/VERIFICATION-2026-09-14.md) records the checks
 completed on the initial build and the checks still outstanding. See [architecture](docs/ARCHITECTURE.md)
 for the service boundaries.

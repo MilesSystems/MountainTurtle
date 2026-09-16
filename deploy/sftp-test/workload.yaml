@@ -1,0 +1,186 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sftp-data
+  namespace: mountain-turtle-test
+  labels:
+    app.kubernetes.io/part-of: mountain-turtle
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: harvester-longhorn-2r
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sftp-config
+  namespace: mountain-turtle-test
+data:
+  sshd_config: |
+    Port 22
+    AddressFamily inet
+    HostKey /etc/ssh/ssh_host_ed25519_key
+    UseDNS no
+    UsePAM no
+    StrictModes yes
+    PermitRootLogin no
+    AllowUsers turtle
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PermitEmptyPasswords no
+    AuthorizedKeysFile .ssh/authorized_keys
+    LoginGraceTime 30
+    MaxAuthTries 3
+    X11Forwarding no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+    PermitTTY no
+    DisableForwarding yes
+    Subsystem sftp internal-sftp
+    ForceCommand internal-sftp -d /upload -u 0027
+    ChrootDirectory %h
+    LogLevel VERBOSE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sftp
+  namespace: mountain-turtle-test
+  labels:
+    app.kubernetes.io/name: mountain-turtle-sftp-test
+    app.kubernetes.io/part-of: mountain-turtle
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mountain-turtle-sftp-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mountain-turtle-sftp-test
+        app.kubernetes.io/part-of: mountain-turtle
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: r640.assessorly.com
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-upload-folder
+          image: atmoz/sftp@sha256:a5a0081d3538c89a3d5addc321589916b85760ac63328449beb3a005fe9598b6
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              mkdir -p /data/upload
+              chown 1000:1000 /data/upload
+              chmod 0750 /data/upload
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER, DAC_OVERRIDE]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: sftp
+          # Official atmoz/sftp:debian manifest resolved on 2026-09-16.
+          image: atmoz/sftp@sha256:a5a0081d3538c89a3d5addc321589916b85760ac63328449beb3a005fe9598b6
+          args: ["turtle::1000:1000:upload"]
+          ports:
+            - {name: sftp, containerPort: 22, protocol: TCP}
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID, SYS_CHROOT, NET_BIND_SERVICE]
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+          startupProbe:
+            tcpSocket: {port: sftp}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket: {port: sftp}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: sftp}
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /home/turtle/upload
+              subPath: upload
+            - name: authorized-keys
+              mountPath: /home/turtle/.ssh/keys
+              readOnly: true
+            - name: ssh-config
+              mountPath: /etc/ssh/sshd_config
+              subPath: sshd_config
+              readOnly: true
+            - name: host-keys
+              mountPath: /etc/ssh/ssh_host_ed25519_key
+              subPath: ssh_host_ed25519_key
+              readOnly: true
+            - name: host-keys
+              mountPath: /etc/ssh/ssh_host_rsa_key
+              subPath: ssh_host_rsa_key
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: sftp-data}
+        - name: authorized-keys
+          configMap: {name: sftp-authorized-keys, defaultMode: 292}
+        - name: ssh-config
+          configMap: {name: sftp-config, defaultMode: 292}
+        - name: host-keys
+          secret: {secretName: sftp-host-keys, defaultMode: 384}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sftp
+  namespace: mountain-turtle-test
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: mountain-turtle-sftp-test
+  ports:
+    - name: sftp
+      port: 22
+      targetPort: sftp
+      protocol: TCP
+      nodePort: 30223
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sftp-lan-only
+  namespace: mountain-turtle-test
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mountain-turtle-sftp-test
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock: {cidr: 192.168.1.0/24}
+      ports:
+        - {protocol: TCP, port: 22}
+  egress: []

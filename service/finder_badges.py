@@ -18,7 +18,7 @@ import threading
 MAX_BODY = 64 * 1024
 MAX_PATHS = 128
 MAX_METADATA = 1024 * 1024
-ROOT_FIELDS = ("id", "name", "mountPath", "state", "mounted")
+ROOT_FIELDS = ("id", "name", "mountPath", "state", "mounted", "supportsPhotoBrowser")
 
 
 def _parts(path):
@@ -132,11 +132,17 @@ def badge_for_path(paths, connections, requested_path):
         return "unknown"
     try:
         identity = _component(connection["id"])
-        bucket = _component(connection["bucket"])
         overlay = paths.base / "icon-overlay"
         uses_overlay = all((overlay / name).is_file() for name in
                            (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"))
-        namespace = ["volume"] if uses_overlay else ["s3", bucket]
+        if uses_overlay:
+            namespace = ["volume"]
+        elif connection.get("backend", "s3") == "sftp":
+            # Match rclone's named-remote cache root without touching the mount.
+            folder = connection.get("remotePath", "").strip("/")
+            namespace = ["sftp"] + ([_component(part) for part in folder.split("/")] if folder else [])
+        else:
+            namespace = ["s3", _component(connection["bucket"])]
         meta_kind, info = _local_file(paths.cache, [identity, "vfsMeta", *namespace, *relative], True)
         data_kind, data_size = _local_file(paths.cache, [identity, "vfs", *namespace, *relative])
         if meta_kind == "missing" and data_kind == "missing":
@@ -229,7 +235,8 @@ class BadgeBridge:
                     self.reply(404, {"error": "Not found"})
                     return
                 try:
-                    roots = [{key: item.get(key) for key in ROOT_FIELDS}
+                    roots = [dict({key: item.get(key) for key in ROOT_FIELDS},
+                                  supportsPhotoBrowser=item.get("backend", "s3") == "s3")
                              for item in bridge.connections()]
                     self.reply(200, {"version": 1, "roots": roots})
                 except Exception:

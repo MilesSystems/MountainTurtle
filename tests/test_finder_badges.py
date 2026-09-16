@@ -159,6 +159,27 @@ class BadgeTests(unittest.TestCase):
         self.addCleanup(bridge.stop)
         return bridge
 
+    def test_sftp_badges_use_overlay_without_an_s3_bucket(self):
+        self.connection.pop("bucket")
+        self.connection.update(backend="sftp", remotePath="/test files")
+        self.cache(self.complete())
+        self.assertEqual(self.state(), "cached")
+
+    def test_sftp_direct_cache_namespace_and_pending_writes(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        (self.paths.base / "icon-overlay/.VolumeIcon.icns").unlink()
+        self.cache(self.complete(Dirty=True), namespace="sftp/test files")
+        self.assertEqual(self.state(), "pending")
+        self.connection["remotePath"] = "../other"
+        self.assertEqual(self.state(), "unknown")
+
+    def test_sftp_roots_disable_photo_browser_without_exposing_server(self):
+        self.connection.update(backend="sftp", host="private-host", user="private-user")
+        status, response = self.request(self.bridge())
+        self.assertEqual(status, 200)
+        self.assertFalse(response["roots"][0]["supportsPhotoBrowser"])
+        self.assertNotIn("private", json.dumps(response))
+
     def request(self, bridge, method="GET", route="/v1/roots", body=None, headers=None, auth=True):
         connection = http.client.HTTPConnection("127.0.0.1", bridge.server.server_address[1], timeout=3)
         self.addCleanup(connection.close)

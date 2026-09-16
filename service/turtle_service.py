@@ -4,6 +4,7 @@
 import argparse
 import contextlib
 import fcntl
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -11,8 +12,10 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -166,8 +169,87 @@ def environment(profile, paths):
             "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3",
         ):
             env.pop(key)
-    env.update(AWS_PROFILE=profile, AWS_SDK_LOAD_CONFIG="1", AWS_PAGER="",
-               AWS_EC2_METADATA_DISABLED="true", AWS_CLI_AUTO_PROMPT="off")
+    if profile:
+        env.update(AWS_PROFILE=profile, AWS_SDK_LOAD_CONFIG="1", AWS_PAGER="",
+                   AWS_EC2_METADATA_DISABLED="true", AWS_CLI_AUTO_PROMPT="off")
+    return env
+
+
+def connection_backend(connection):
+    backend = connection.get("backend", "s3")
+    if backend not in ("s3", "sftp"):
+        raise ValueError("Choose Amazon S3 or SFTP for this drive")
+    return backend
+
+
+def credential(paths, operation, identity, password=None):
+    """Secrets travel only through pipes to the native macOS Keychain helper."""
+    helper = paths.resources.parent / "Helpers/Mountain Turtle Credentials"
+    if not helper.is_file() or not os.access(helper, os.X_OK):
+        raise ValueError("Use the built Mountain Turtle app to save or read SFTP passwords in macOS Keychain")
+    try:
+        result = subprocess.run([str(helper), operation, identity], input=password,
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("macOS Keychain is unavailable. Unlock your login keychain and try again.") from None
+    if result.returncode:
+        raise ValueError("Could not access this drive's SFTP password in macOS Keychain. Edit the connection to save it again.")
+    return result.stdout if operation == "get" else ""
+
+
+def forget_credential(paths, identity):
+    try:
+        credential(paths, "delete", identity)
+    except ValueError:
+        # A locked Keychain must not prevent removing a disconnected drive.
+        logging.warning("Could not remove an unused SFTP password from macOS Keychain")
+
+
+class PasswordChange:
+    """Roll back Keychain changes if the corresponding settings cannot commit."""
+    def __init__(self, paths):
+        self.paths, self.previous = paths, []
+
+    def set(self, identity, password, had_password):
+        previous = credential(self.paths, "get", identity) if had_password else None
+        # Record before the helper call: a timeout may have happened after the
+        # Keychain accepted the new value but before reporting success.
+        self.previous.append((identity, previous))
+        credential(self.paths, "set", identity, password)
+
+    def rollback(self):
+        for identity, previous in reversed(self.previous):
+            try:
+                if previous is None:
+                    credential(self.paths, "delete", identity)
+                else:
+                    credential(self.paths, "set", identity, previous)
+            except ValueError:
+                raise ValueError("Connection settings were not saved, and the previous Keychain password could not be restored. Edit this connection and save its correct password before connecting.") from None
+
+
+def password_input():
+    password = sys.stdin.read(16385)
+    if len(password) > 16384 or any(c in password for c in ("\r", "\n", "\0")):
+        raise ValueError("Use an SFTP password without line breaks, up to 16384 characters")
+    return password
+
+
+def mount_environment(connection, paths, rclone):
+    env = environment(connection.get("profile") if connection_backend(connection) == "s3" else None, paths)
+    if connection_backend(connection) == "sftp" and connection.get("authMode", "agent") == "password":
+        password = credential(paths, "get", connection["id"])
+        if not password or any(c in password for c in ("\r", "\n", "\0")):
+            raise ValueError("Save this drive's SFTP password again before connecting")
+        try:
+            obscured = subprocess.run([rclone, "obscure", "-"], input=password + "\n", env=env,
+                                      capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError("Could not prepare SFTP authentication. Check rclone and try again.") from None
+        token = obscured.stdout.strip()
+        if obscured.returncode or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise ValueError("Could not prepare SFTP authentication. Check rclone and try again.")
+        env["RCLONE_CONFIG_SFTP_PASS"] = token
     return env
 
 
@@ -199,11 +281,16 @@ def service_running(paths):
         return False
 
 
-def validate_fields(name, bucket, profile, region):
+def validate_name(name):
     name = name.strip()
     if (not name or name in (".", "..") or name.startswith(".") or len(name.encode()) > 180
             or any(ord(c) < 32 or c in "/:\\" for c in name)):
         raise ValueError("Choose a visible drive name without slashes, colons, or control characters")
+    return name
+
+
+def validate_fields(name, bucket, profile, region):
+    name = validate_name(name)
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
         raise ValueError("Enter a valid S3 bucket name, without s3:// or a folder path")
     if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", profile):
@@ -211,6 +298,48 @@ def validate_fields(name, bucket, profile, region):
     if not re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]+)+-\d", region):
         raise ValueError("Enter an AWS region such as us-east-1")
     return name
+
+
+def local_ssh_file(value, paths, label):
+    if not value or any(ord(c) < 32 or ord(c) == 127 or c == "$" for c in value):
+        raise ValueError(f"Choose a local {label} file without control characters or environment variables")
+    if value.startswith("~/"):
+        value = str(paths.home / value[2:])
+    path = Path(value)
+    if not path.is_absolute() or value != value.strip():
+        raise ValueError(f"Choose an absolute path or ~/ path for the {label} file")
+    if not path.is_file() or not os.access(path, os.R_OK):
+        raise ValueError(f"The {label} file is missing or unreadable. Choose an existing file before connecting.")
+    return str(path)
+
+
+def validate_sftp(connection, paths):
+    host = connection.get("host", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:%-]+", host):
+        raise ValueError("Enter an SFTP hostname or IP address, without sftp:// or a port")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if len(host) > 253 or not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                                      for label in host.removesuffix(".").split(".")):
+            raise ValueError("Enter an SFTP hostname or IP address, without sftp:// or a port")
+    user = connection.get("user", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@\\-]{0,127}", user):
+        raise ValueError("Enter a valid SSH username without spaces or control characters")
+    port = connection.get("port", 22)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("Enter an SFTP port between 1 and 65535")
+    remote_path = connection.get("remotePath", "")
+    if (len(remote_path.encode()) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in remote_path)
+            or remote_path.startswith("~") or any(part == ".." for part in remote_path.split("/"))):
+        raise ValueError("Use a remote folder path without ~, parent traversal, or control characters; leave it blank for your home folder")
+    mode = connection.get("authMode", "agent")
+    if mode not in ("agent", "keyFile", "password"):
+        raise ValueError("Choose SSH agent, private key file, or password authentication")
+    known_hosts = local_ssh_file(connection.get("knownHostsFile") or "~/.ssh/known_hosts", paths, "known hosts")
+    key_file = local_ssh_file(connection.get("keyFile", ""), paths, "SSH private key") if mode == "keyFile" else ""
+    return {"host": host, "user": user, "port": port, "remotePath": remote_path,
+            "authMode": mode, "keyFile": key_file, "knownHostsFile": known_hosts}
 
 
 def cache_settings(connection, size=None, age=None):
@@ -235,13 +364,18 @@ class Store:
                          {"version": 1, "launchAtLogin": False, "shutdown": False, "connections": []})
 
     @contextlib.contextmanager
-    def update(self):
+    def update(self, rollback=None):
         self.paths.prepare()
         with (self.paths.base / "state.lock").open("a+") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             value = self.read()
-            yield value
-            write_json(self.paths.base / "connections.json", value)
+            try:
+                yield value
+                write_json(self.paths.base / "connections.json", value)
+            except BaseException:
+                if rollback:
+                    rollback()
+                raise
 
     def runtime(self):
         return read_json(self.paths.base / "runtime.json", {"connections": {}})
@@ -280,22 +414,37 @@ def materialized_icon_overlay(paths):
 
 
 def connection_config(connection, paths):
-    config = ("[s3]\ntype = s3\nprovider = AWS\nenv_auth = true\n"
-              f'profile = {connection["profile"]}\nregion = {connection["region"]}\n'
-              "no_check_bucket = true\ndirectory_markers = false\n")
+    if connection_backend(connection) == "sftp":
+        fields = validate_sftp(connection, paths)
+        config = ("[sftp]\ntype = sftp\n"
+                  f'host = {fields["host"]}\nuser = {fields["user"]}\nport = {fields["port"]}\n'
+                  f'known_hosts_file = {fields["knownHostsFile"]}\n'
+                  "shell_type = none\ndisable_hashcheck = true\nuse_insecure_cipher = false\n"
+                  f'key_use_agent = {str(fields["authMode"] == "agent").lower()}\n')
+        if fields["authMode"] == "keyFile":
+            config += f'key_file = {fields["keyFile"]}\n'
+        remote = "sftp:" + fields["remotePath"]
+    else:
+        validate_fields(connection["name"], connection["bucket"], connection["profile"], connection["region"])
+        config = ("[s3]\ntype = s3\nprovider = AWS\nenv_auth = true\n"
+                  f'profile = {connection["profile"]}\nregion = {connection["region"]}\n'
+                  "no_check_bucket = true\ndirectory_markers = false\n")
+        remote = "s3:" + connection["bucket"]
     overlay = materialized_icon_overlay(paths)
     if overlay:
-        # The resource path is local application data. Quote without enabling a shell.
-        quoted = str(overlay).replace("\\", "\\\\").replace('"', '\\"')
-        config += (f'\n[volume]\ntype = union\nupstreams = "{quoted}:ro" s3:{connection["bucket"]}\n'
+        # Rclone's SpaceSepList uses CSV quoting, not shell/backslash escaping.
+        quoted = str(overlay).replace('"', '""')
+        # A trailing slash keeps a folder named e.g. "photos:ro" from being
+        # interpreted as a union backend option instead of the remote folder.
+        upstream = remote + "/" if connection_backend(connection) == "sftp" and connection.get("remotePath") and not remote.endswith("/") else remote
+        upstream = upstream.replace('"', '""')
+        config += (f'\n[volume]\ntype = union\nupstreams = "{quoted}:ro" "{upstream}"\n'
                    "action_policy = epall\ncreate_policy = ff\nsearch_policy = epall\n")
         remote = "volume:"
-    else:
-        remote = "s3:" + connection["bucket"]
     return config, remote
 
 
-def mount_command(connection, paths, rclone, remote):
+def mount_command(connection, paths, rclone, remote, rc_port=None):
     identity = connection["id"]
     cache = cache_settings(connection)
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
@@ -317,7 +466,19 @@ def mount_command(connection, paths, rclone, remote):
                "--log-file-max-size", "2Mi", "--log-file-max-backups", "2"]
     if connection["readOnly"]:
         command.append("--read-only")
+    if rc_port is not None:
+        command += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]
     return command
+
+
+def remote_control_settings():
+    # If another process wins this short port reservation race, rclone fails
+    # closed and the supervisor retries with a fresh authenticated endpoint.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    return {"rcPort": port, "rcUser": secrets.token_urlsafe(18),
+            "rcPass": secrets.token_urlsafe(32), "sessionID": str(uuid.uuid4())}
 
 
 def tail_error(connection, paths):
@@ -337,7 +498,12 @@ def tail_error(connection, paths):
                         continue
                 except ValueError:
                     continue
-            if AUTH_ERRORS.search(line):
+            if connection_backend(connection) == "sftp":
+                if re.search(r"knownhosts|host key|no authorities for hostname", line, re.I):
+                    return "SFTP server identity could not be verified. Check its host key with the server administrator and update your known hosts file."
+                if re.search(r"unable to authenticate|authentication failed|no supported methods|ssh agent|ssh-agent|private key", line, re.I):
+                    return "SFTP authentication failed. Check your username and password, or unlock your SSH key in the SSH agent."
+            elif AUTH_ERRORS.search(line):
                 return "AWS sign-in expired. Choose Sign In to renew this profile."
             if "ERROR" in line or "CRITICAL" in line:
                 # Avoid echoing arbitrary credential-provider output into the UI.
@@ -441,8 +607,9 @@ class Supervisor:
         self.sidebar_processes, self.sidebar_results = {}, {}
 
     def record(self, connection, state, message="", pid=None):
+        rc = self.children.get(connection["id"], {}).get("remoteControl", {})
         self.runtime[connection["id"]] = {"state": state, "message": message, "pid": pid,
-                                          "updatedAt": time.time(), **self.sidebar_results.get(connection["id"], {})}
+                                          "updatedAt": time.time(), **rc, **self.sidebar_results.get(connection["id"], {})}
 
     def start_sidebar(self, connection, child):
         """Once per confirmed mount generation, including adopted rclone processes."""
@@ -546,7 +713,10 @@ class Supervisor:
             expected = str(self.paths.remotes / (connection["id"] + ".conf"))
             if "rclone nfsmount " in command and expected in command:
                 self.children[connection["id"]] = {"process": ExistingProcess(pid), "started": time.time(),
-                                                    "seenMounted": str(self.paths.mounts / connection["name"]) in mount_table()}
+                                                    "seenMounted": str(self.paths.mounts / connection["name"]) in mount_table(),
+                                                    "remoteControl": {key: previous[connection["id"]][key]
+                                                        for key in ("rcPort", "rcUser", "rcPass", "sessionID")
+                                                        if key in previous[connection["id"]]}}
 
     def start_mount(self, connection):
         identity = connection["id"]
@@ -568,28 +738,32 @@ class Supervisor:
             if any(path.iterdir()):
                 raise ValueError("The drive folder contains local files; move them before connecting")
             config, remote = connection_config(connection, self.paths)
+            child_env = mount_environment(connection, self.paths, deps["rclone"])
+            rc = remote_control_settings()
+            child_env.update(RCLONE_RC_USER=rc["rcUser"], RCLONE_RC_PASS=rc["rcPass"])
             config_path = self.paths.remotes / (identity + ".conf")
             config_path.write_text(config)
             config_path.chmod(0o600)
             (self.paths.cache / identity).mkdir(parents=True, exist_ok=True, mode=0o700)
             started = time.time()
             with (self.paths.logs / (identity + ".log")).open("ab", buffering=0) as error_log:
-                process = subprocess.Popen(mount_command(connection, self.paths, deps["rclone"], remote),
-                                           env=environment(connection["profile"], self.paths),
-                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error_log)
+                process = subprocess.Popen(mount_command(connection, self.paths, deps["rclone"], remote, rc["rcPort"]),
+                                           env=child_env,
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error_log,
+                                           start_new_session=True)
             # Logs span reconnects; keep errors from an earlier process out of
             # the new connection's status, including after supervisor recovery.
             current["lastMountAt"] = connection["lastMountAt"] = started
             current.pop("refreshRequested", None)
-            self.children[identity] = {"process": process, "started": started, "seenMounted": False}
-            self.record(connection, "connecting", "Connecting to S3…", process.pid)
+            self.children[identity] = {"process": process, "started": started, "seenMounted": False, "remoteControl": rc}
+            self.record(connection, "connecting", "Connecting to SFTP…" if connection_backend(connection) == "sftp" else "Connecting to S3…", process.pid)
             self.publish()
 
     def eject(self, connection):
         identity = connection["id"]
         if pending_writes(connection, self.paths):
             child = self.children.get(identity, {}).get("process")
-            self.record(connection, "disconnecting", "Waiting for pending S3 uploads; cached changes are preserved.",
+            self.record(connection, "disconnecting", "Waiting for pending uploads; cached changes are preserved.",
                         child.pid if child else None)
             return
         process = subprocess.Popen(["/sbin/umount", str(self.paths.mounts / connection["name"])],
@@ -669,7 +843,7 @@ class Supervisor:
                         self.eject(connection)
                 elif child:
                     if pending_writes(connection, self.paths):
-                        self.record(connection, "disconnecting", "Waiting for pending S3 uploads; cached changes are preserved.", child["process"].pid)
+                        self.record(connection, "disconnecting", "Waiting for pending uploads; cached changes are preserved.", child["process"].pid)
                     else:
                         child["expectedStop"] = True
                         child["process"].terminate()
@@ -730,6 +904,17 @@ class Supervisor:
         return not (state.get("shutdown") and not self.children and not self.ejections and not self.sidebar_processes
                     and not any(str(self.paths.mounts / c["name"]) in mounts for c in state["connections"]))
 
+    def restore_login_intent(self):
+        # launchd also reruns --at-login after a crash. An existing, verified
+        # owned mount proves this is recovery within the current login, so keep
+        # every user's current connection choice, including disconnected drives.
+        if any(child.get("seenMounted") for child in self.children.values()):
+            return
+        with self.store.update() as state:
+            state["shutdown"] = False
+            for connection in state["connections"]:
+                connection["desiredConnected"] = connection.get("autoConnect", False)
+
     def serve(self, at_login=False):
         self.paths.prepare()
         with (self.paths.base / "service.lock").open("a+") as lock:
@@ -741,12 +926,9 @@ class Supervisor:
                 self.paths.logs / "service.log", maxBytes=2 * 1024**2, backupCount=2)])
             signal.signal(signal.SIGTERM, lambda *_: setattr(self, "stop_requested", True))
             signal.signal(signal.SIGINT, lambda *_: setattr(self, "stop_requested", True))
-            if at_login:
-                with self.store.update() as state:
-                    state["shutdown"] = False
-                    for connection in state["connections"]:
-                        connection["desiredConnected"] = connection.get("autoConnect", False)
             self.recover(self.store.read()["connections"])
+            if at_login:
+                self.restore_login_intent()
             from finder_badges import BadgeBridge
             bridge = BadgeBridge(self.paths, lambda: self.badge_connections)
             try:
@@ -783,7 +965,14 @@ def status(paths):
     running, mounted = service_running(paths), mount_table()
     connections = []
     for connection in saved["connections"]:
-        item = {key: connection[key] for key in ("id", "name", "bucket", "profile", "region", "readOnly", "autoConnect")}
+        item = {key: connection[key] for key in ("id", "name", "readOnly", "autoConnect")}
+        item.update(backend=connection_backend(connection),
+                    **{key: connection.get(key, "") for key in ("bucket", "profile", "region")})
+        if item["backend"] == "sftp":
+            item.update({key: connection.get(key, "") for key in
+                         ("host", "user", "remotePath", "keyFile", "knownHostsFile")})
+            item.update(port=connection.get("port", 22), authMode=connection.get("authMode", "agent"),
+                        passwordConfigured=connection.get("passwordConfigured", False))
         item.update(cache_settings(connection))
         live = runtime.get(connection["id"], {})
         item.update(desiredConnected=connection.get("desiredConnected", False),
@@ -841,9 +1030,18 @@ def parser():
         operation = commands.add_parser(command)
         if command == "edit":
             operation.add_argument("id")
-        for field in ("name", "bucket", "profile", "region"):
-            operation.add_argument("--" + field, required=True)
-        operation.add_argument("--read-only", action="store_true")
+        operation.add_argument("--name", required=True)
+        operation.add_argument("--backend", choices=("s3", "sftp"), default="s3")
+        for field in ("bucket", "profile", "region", "host", "user", "remote-path", "key-file"):
+            operation.add_argument("--" + field, default="")
+        operation.add_argument("--port", type=int, default=22)
+        operation.add_argument("--auth-mode", choices=("agent", "keyFile", "password"), default="agent")
+        operation.add_argument("--known-hosts-file", default="~/.ssh/known_hosts")
+        operation.add_argument("--password-stdin", action="store_true")
+        access = operation.add_mutually_exclusive_group()
+        access.add_argument("--read-only", action="store_true", dest="read_only")
+        access.add_argument("--read-write", action="store_false", dest="read_only")
+        operation.set_defaults(read_only=True)
         operation.add_argument("--auto-connect", action="store_true")
         operation.add_argument("--cache-max-size-mib", type=int)
         operation.add_argument("--cache-max-age-hours", type=int)
@@ -877,6 +1075,8 @@ def action(args, paths):
         return {"ok": True, "message": "Login startup updated; active drives stay connected."}
     if args.command == "login":
         connection = find_connection(store.read(), args.id)
+        if connection_backend(connection) != "s3":
+            raise ValueError("SFTP uses your saved SSH authentication. Edit this connection to update its credentials.")
         aws = executable("aws")
         if not aws:
             raise ValueError("Install the AWS command-line tools to sign in")
@@ -906,9 +1106,21 @@ def action(args, paths):
             ensure_service(paths)
         return {"ok": True, "message": "Safe disconnection requested; busy drives remain attached.", "pendingMounts": busy}
     mounted = mount_table()
-    with store.update() as state:
+    credential_to_remove = None
+    password_change = PasswordChange(paths)
+    with store.update(rollback=password_change.rollback) as state:
         if args.command in ("add", "edit"):
-            name = validate_fields(args.name, args.bucket, args.profile, args.region)
+            name = validate_name(args.name)
+            if args.backend == "sftp":
+                fields = validate_sftp({"host": args.host, "user": args.user, "port": args.port,
+                    "remotePath": args.remote_path, "authMode": args.auth_mode,
+                    "keyFile": args.key_file, "knownHostsFile": args.known_hosts_file}, paths)
+                fields.update(bucket="", profile="", region="")
+            else:
+                validate_fields(name, args.bucket, args.profile, args.region)
+                fields = {"bucket": args.bucket, "profile": args.profile, "region": args.region}
+            if args.password_stdin and (args.backend != "sftp" or args.auth_mode != "password"):
+                raise ValueError("Password input is available only for an SFTP connection using password authentication")
             identity = args.id if args.command == "edit" else str(uuid.uuid4())
             if any(c["name"].casefold() == name.casefold() and c["id"] != identity for c in state["connections"]):
                 raise ValueError("Another saved drive already uses this name")
@@ -920,20 +1132,46 @@ def action(args, paths):
             else:
                 connection = {"id": identity}
                 state["connections"].append(connection)
-            connection.update(name=name, bucket=args.bucket, profile=args.profile, region=args.region,
+            settings = cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours)
+            old_password = connection.get("passwordConfigured", False)
+            password = ""
+            if args.backend == "sftp" and args.auth_mode == "password":
+                password = password_input() if args.password_stdin else ""
+                same_endpoint = (connection_backend(connection) == "sftp"
+                    and all(connection.get(key) == fields[key] for key in ("host", "user", "port")))
+                if old_password and not password and not same_endpoint:
+                    raise ValueError("Enter the SFTP password again when changing the server, port, or username")
+                if not password and not old_password:
+                    raise ValueError("Enter an SFTP password to save securely in macOS Keychain")
+                fields["passwordConfigured"] = True
+            elif old_password:
+                credential_to_remove = identity
+            if args.command == "edit":
+                destination_fields = ("bucket", "profile", "region") if args.backend == "s3" else ("host", "user", "port", "remotePath")
+                if (connection_backend(connection) != args.backend
+                        or any(connection.get(key, "") != fields[key] for key in destination_fields)):
+                    clear_cache(connection, paths)
+            if password:
+                password_change.set(identity, password, old_password)
+            for key in ("host", "user", "port", "remotePath", "authMode", "keyFile", "knownHostsFile", "passwordConfigured"):
+                connection.pop(key, None)
+            connection.update(fields)
+            connection.update(name=name, backend=args.backend,
                               readOnly=args.read_only, autoConnect=args.auto_connect, desiredConnected=False,
                               updatedAt=time.time(), revision=connection.get("revision", 0) + 1)
-            connection.update(cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours))
+            connection.update(settings)
         else:
             connection = find_connection(state, args.id)
             identity = args.id
             if args.command == "remove":
                 assert_disconnected(connection, store.runtime(), mounted, paths)
                 state["connections"].remove(connection)
+                if connection.get("passwordConfigured"):
+                    credential_to_remove = identity
             elif args.command in ("rename", "settings", "clear-cache"):
                 assert_disconnected(connection, store.runtime(), mounted, paths)
                 if args.command == "rename":
-                    name = validate_fields(args.name, connection["bucket"], connection["profile"], connection["region"])
+                    name = validate_name(args.name)
                     if any(c["name"].casefold() == name.casefold() and c["id"] != identity for c in state["connections"]):
                         raise ValueError("Another saved drive already uses this name")
                     connection["name"] = name
@@ -954,6 +1192,8 @@ def action(args, paths):
                     connection["reconnectRequested"] = args.command == "reconnect"
                 connection["revision"] = connection.get("revision", 0) + 1
                 state["shutdown"] = False
+    if credential_to_remove:
+        forget_credential(paths, credential_to_remove)
     if args.command in ("connect", "reconnect", "refresh") or (args.command == "disconnect" and str(paths.mounts / connection["name"]) in mounted):
         ensure_service(paths)
     return {"ok": True, "id": identity}

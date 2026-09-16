@@ -7,6 +7,7 @@ import os
 let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
 let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
 let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
+let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.4.0"
 
 struct Connection: Codable, Identifiable, Equatable {
     var id: String
@@ -25,6 +26,25 @@ struct Connection: Codable, Identifiable, Equatable {
     var cacheMaxSizeMiB: Int?
     var cacheMaxAgeHours: Int?
     var sidebarError: String?
+    var backend: String?
+    var host: String?
+    var user: String?
+    var port: Int?
+    var remotePath: String?
+    var authMode: String?
+    var keyFile: String?
+    var knownHostsFile: String?
+    var passwordConfigured: Bool?
+
+    var isSFTP: Bool { backend == "sftp" }
+    var supportsPhotoBrowser: Bool { !isSFTP }
+    var authenticationLabel: String {
+        switch authMode {
+        case "password": return "Password in Keychain"
+        case "keyFile": return "SSH private key"
+        default: return "SSH agent"
+        }
+    }
 
     var isConnected: Bool { state == "connected" }
     var isMounted: Bool { mounted ?? isConnected }
@@ -131,7 +151,7 @@ enum ServiceClient {
         }
     }
 
-    static func writeTerminalInstaller() throws -> URL {
+    static func writeTerminalInstaller(includeAWS: Bool) throws -> URL {
         let support = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Mountain Turtle", isDirectory: true)
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
@@ -148,7 +168,7 @@ enum ServiceClient {
             eval "$(/usr/local/bin/brew shellenv)"
           fi
         fi
-        brew install awscli rclone
+        brew install \(includeAWS ? "awscli rclone" : "rclone")
         echo
         echo "Mountain Turtle tools are installed. Return to Mountain Turtle and refresh setup."
         read -r -p "Press Return to close this window. "
@@ -158,22 +178,22 @@ enum ServiceClient {
         return script
     }
 
-    static func openTerminalInstaller() throws {
-        let script = try writeTerminalInstaller()
+    static func openTerminalInstaller(includeAWS: Bool) throws {
+        let script = try writeTerminalInstaller(includeAWS: includeAWS)
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true)
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: configuration)
     }
 
-    static func installToolsWithHomebrew(progress: @escaping @Sendable (String) -> Void) async throws {
+    static func installToolsWithHomebrew(includeAWS: Bool, progress: @escaping @Sendable (String) -> Void) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 let output = Pipe()
                 let command = """
                 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                brew install awscli rclone
+                brew install \(includeAWS ? "awscli rclone" : "rclone")
                 """
                 process.executableURL = URL(fileURLWithPath: "/bin/zsh")
                 process.arguments = ["-lc", command]
@@ -199,7 +219,7 @@ enum ServiceClient {
                 }
                 process.terminationHandler = { proc in
                     if proc.terminationStatus == 0 { finish(.success(())) }
-                    else { finish(.failure(TurtleError(message: "Homebrew could not install AWS CLI and rclone. Open the Terminal installer and try again."))) }
+                    else { finish(.failure(TurtleError(message: "Homebrew could not install the selected tools. Open the Terminal installer and try again."))) }
                 }
                 do { try process.run() }
                 catch { finish(.failure(error)) }
@@ -207,7 +227,7 @@ enum ServiceClient {
         }
     }
 
-    static func run(_ arguments: [String]) async throws -> Data {
+    static func run(_ arguments: [String], standardInput: Data? = nil) async throws -> Data {
         let resources = self.resources
         let script = resources.appendingPathComponent("service/turtle_service.py")
         guard FileManager.default.fileExists(atPath: script.path) else {
@@ -219,11 +239,17 @@ enum ServiceClient {
                 let output = Pipe(), errors = Pipe()
                 process.standardOutput = output
                 process.standardError = errors
+                let input = standardInput.map { _ in Pipe() }
+                process.standardInput = input ?? FileHandle.nullDevice
                 do {
                     guard let python = pythonPath else { throw TurtleError(message: "A working Python 3.9 or newer is needed to run the mount service. See the setup guide.") }
                     process.executableURL = URL(fileURLWithPath: python)
                     process.arguments = [script.path, "--resource-dir", resources.path] + arguments
                     try process.run()
+                    if let input, let standardInput {
+                        try input.fileHandleForWriting.write(contentsOf: standardInput)
+                        try input.fileHandleForWriting.close()
+                    }
                     let data = output.fileHandleForReading.readDataToEndOfFile()
                     _ = errors.fileHandleForReading.readDataToEndOfFile()
                     process.waitUntilExit()
@@ -258,9 +284,10 @@ enum ServiceClient {
 
     var selected: Connection? { connections.first { $0.id == selectedID } }
     var connectedCount: Int { connections.filter(\.isConnected).count }
-    var missingTools: Bool { !isLoading && (dependencies.aws == nil || dependencies.rclone == nil) }
+    var requiresAWS: Bool { connections.contains { !$0.isSFTP } }
+    var missingTools: Bool { !isLoading && ((!dependencies.awsReady && requiresAWS) || !dependencies.rcloneReady) }
     var setupNeedsAttention: Bool {
-        !isLoading && serviceError == nil && (!dependencies.installedReady || !dependencies.awsReady
+        !isLoading && serviceError == nil && (!dependencies.installedReady || (requiresAWS && !dependencies.awsReady)
             || !dependencies.rcloneReady || dependencies.privacyState == "needsApproval")
     }
 
@@ -291,13 +318,13 @@ enum ServiceClient {
         } catch { serviceError = error.localizedDescription }
     }
 
-    @discardableResult func action(_ args: [String]) async -> Bool {
+    @discardableResult func action(_ args: [String], standardInput: Data? = nil) async -> Bool {
         guard activeAction == nil else { return false }
         activeAction = args.first
         loginMessage = nil
         defer { activeAction = nil }
         do {
-            let data = try await ServiceClient.run(args)
+            let data = try await ServiceClient.run(args, standardInput: standardInput)
             let response = try JSONDecoder().decode(ActionResponse.self, from: data)
             guard response.ok else { throw TurtleError(message: response.error ?? "The action could not be completed.") }
             if let id = response.id { selectedID = id }
@@ -336,7 +363,7 @@ enum ServiceClient {
               components.queryItems?.count == 1,
               let item = components.queryItems?.first, item.name == "action",
               let action = item.value,
-              ["finder", "browse", "settings", "rename", "refresh", "reconnect", "eject"].contains(action) else { return }
+              ["finder", "browse", "settings", "rename", "refresh", "reconnect", "eject", "metrics"].contains(action) else { return }
         // A toolbar URL can arrive during the launch-time status refresh.
         // Resolve it with an awaited snapshot rather than dropping the action.
         do {
@@ -348,7 +375,15 @@ enum ServiceClient {
         selectedID = connection.id
         switch action {
         case "finder": openFinder(connection)
-        case "browse": drivePanel = DrivePanel(connection: connection, kind: .photos)
+        case "browse":
+            if connection.supportsPhotoBrowser { drivePanel = DrivePanel(connection: connection, kind: .photos) }
+            else {
+                driveMessage = connection.isMounted
+                    ? "SFTP photos open in Finder. The smaller-preview photo browser is available for S3 drives."
+                    : "Connect this SFTP drive to browse photos in Finder. The smaller-preview photo browser is available for S3 drives."
+                openFinder(connection)
+            }
+        case "metrics": drivePanel = DrivePanel(connection: connection, kind: .metrics)
         case "settings": drivePanel = DrivePanel(connection: connection, kind: .settings)
         case "rename": drivePanel = DrivePanel(connection: connection, kind: .rename)
         case "refresh": if await self.action(["refresh", connection.id]) { driveMessage = "Folder listings refreshed. Reopen the folder in Finder to see changes." }
@@ -391,7 +426,7 @@ enum ServiceClient {
             try await request(arguments)
             if restore { try await request(["connect", connection.id]) }
             await refresh()
-            driveMessage = arguments.first == "rename" ? "Drive renamed. Its S3 bucket and cached files are unchanged." : arguments.first == "clear-cache" ? "Local cache cleared." : "Download settings saved."
+            driveMessage = arguments.first == "rename" ? "Drive renamed. Its remote files and cached copies are unchanged." : arguments.first == "clear-cache" ? "Local cache cleared." : "Download settings saved."
             return true
         } catch {
             let failure = error.localizedDescription
@@ -432,9 +467,9 @@ struct MainView: View {
             Divider()
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text("Your S3 drives").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                    Text("Your drives").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    Text("PREVIEW 0.3").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
+                    Text("PREVIEW \(appVersion)").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(moss.opacity(0.8))
                     Button { showSetup = true } label: {
                         Image(systemName: model.setupNeedsAttention ? "wrench.and.screwdriver.fill" : "checkmark.seal")
                     }.buttonStyle(.plain).help("Setup checklist").padding(.leading, 10)
@@ -449,7 +484,7 @@ struct MainView: View {
                         Image(systemName: "shippingbox").foregroundStyle(moss)
                         VStack(alignment: .leading, spacing: 5) {
                             Text("A little setup first").fontWeight(.semibold)
-                            Text("Install AWS CLI and rclone to connect your S3 buckets.").foregroundStyle(.secondary)
+                            Text("Install rclone to connect drives. S3 connections also use AWS CLI.").foregroundStyle(.secondary)
                             Button("Open setup") { showSetup = true }.buttonStyle(.link)
                         }
                     }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(cream).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 32)
@@ -466,6 +501,7 @@ struct MainView: View {
         .sheet(item: $model.drivePanel) { panel in
             switch panel.kind {
             case .photos: PhotoBrowserView(connection: panel.connection)
+            case .metrics: DriveMetricsView(connection: panel.connection)
             case .settings: DriveSettingsView(model: model, connection: panel.connection)
             case .rename: RenameDriveView(model: model, connection: panel.connection)
             }
@@ -479,11 +515,11 @@ struct MainView: View {
                 if let connection = removing { Task { await model.action(["remove", connection.id]) } }
                 removing = nil
             }
-        } message: { Text("This removes the connection from Mountain Turtle. Files in the S3 bucket stay where they are.") }
+        } message: { Text("This removes the connection from Mountain Turtle. Remote files stay where they are.") }
         .onReceive(NotificationCenter.default.publisher(for: .showTurtleWindow)) { _ in openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         .onChange(of: model.setupNeedsAttention) { _, needsAttention in
-            guard needsAttention, setupPanelSeenVersion != "0.3.0" else { return }
-            setupPanelSeenVersion = "0.3.0"
+            guard needsAttention, setupPanelSeenVersion != appVersion else { return }
+            setupPanelSeenVersion = appVersion
             showSetup = true
         }
         .onAppear { model.start() }
@@ -551,17 +587,17 @@ struct MainView: View {
         VStack(spacing: 20) {
             Spacer()
             BrandIcon(size: 138)
-            Text("Your buckets. On your Mac.").font(.system(size: 28, weight: .semibold)).foregroundStyle(ink)
-            Text("Connect an S3 bucket and browse its files in Finder.\nDownload and cache files as you need them.")
+            Text("Your files. On your Mac.").font(.system(size: 28, weight: .semibold)).foregroundStyle(ink)
+            Text("Connect an S3 bucket or SFTP server in Finder.\nDownload and cache files as you need them.")
                 .font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(5)
             Button("Add your first connection") { showAdd = true }.buttonStyle(.borderedProminent).controlSize(.large).padding(.top, 6)
             HStack(spacing: 24) {
-                Label("AWS SSO", systemImage: "person.badge.key")
+                Label("S3 & SFTP", systemImage: "network")
                 Label("Finder drives", systemImage: "externaldrive")
                 Label("No subscription", systemImage: "checkmark.seal")
             }.font(.system(size: 11)).foregroundStyle(moss).padding(.top, 16)
             Spacer()
-            Text("Your files stay in your S3 bucket.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 30)
+            Text("Your files stay on your connected storage.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 30)
         }.frame(maxWidth: .infinity)
     }
 
@@ -572,7 +608,7 @@ struct MainView: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: 20).fill(moss.opacity(0.08)).frame(width: 86, height: 86)
                         Image(systemName: "externaldrive.fill").font(.system(size: 43)).foregroundStyle(moss)
-                        Text("S3").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(cream).offset(y: -6)
+                        Text(connection.isSFTP ? "SFTP" : "S3").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(cream).offset(y: -6)
                     }
                     VStack(alignment: .leading, spacing: 10) {
                         Text(connection.name).font(.system(size: 28, weight: .semibold)).foregroundStyle(ink).textSelection(.enabled)
@@ -584,7 +620,10 @@ struct MainView: View {
                     }.padding(.top, 5)
                     Spacer()
                     Menu {
-                        Button("Browse photos…") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
+                        if connection.supportsPhotoBrowser {
+                            Button("Browse photos…") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
+                        }
+                        Button("Drive insights…") { model.drivePanel = DrivePanel(connection: connection, kind: .metrics) }
                         Button("Download & cache settings…") { model.drivePanel = DrivePanel(connection: connection, kind: .settings) }
                         Button("Rename drive…") { model.drivePanel = DrivePanel(connection: connection, kind: .rename) }
                         Divider()
@@ -605,31 +644,32 @@ struct MainView: View {
                     if connection.isConnected {
                         Button { model.openFinder(connection) } label: { Label("Show in Finder", systemImage: "folder") }.buttonStyle(.borderedProminent)
                         Button { Task { await model.action(["disconnect", connection.id]) } } label: { Label("Eject", systemImage: "eject") }
-                        Button("Sign in to AWS") { Task { await model.action(["login", connection.id]) } }
-                    } else if connection.state == "needsLogin" {
+                        if !connection.isSFTP { Button("Sign in to AWS") { Task { await model.action(["login", connection.id]) } } }
+                    } else if connection.state == "needsLogin" && !connection.isSFTP {
                         Button { Task { await model.action(["login", connection.id]) } } label: { Label("Sign in to AWS", systemImage: "person.badge.key") }.buttonStyle(.borderedProminent)
                         Button("Try connecting again") { Task { await model.action(["connect", connection.id]) } }
                     } else {
                         Button { Task { await model.action(["connect", connection.id]) } } label: { Label(connection.state == "disconnecting" ? "Ejecting…" : connection.isWorking ? "Connecting…" : "Connect drive", systemImage: "bolt.horizontal") }.buttonStyle(.borderedProminent).disabled(connection.isWorking)
-                        Button("Sign in to AWS") { Task { await model.action(["login", connection.id]) } }.disabled(connection.isWorking)
+                        if !connection.isSFTP { Button("Sign in to AWS") { Task { await model.action(["login", connection.id]) } }.disabled(connection.isWorking) }
                     }
                     if !connection.isConnected && (connection.isMounted || connection.desiredConnected) {
                         Button(connection.isMounted ? "Eject" : "Cancel connection") { Task { await model.action(["disconnect", connection.id]) } }
                             .disabled(connection.state == "disconnecting")
                     }
                 }.controlSize(.large).disabled(model.activeAction != nil)
-                if model.activeAction == "login" {
+                if model.activeAction == "login" && !connection.isSFTP {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
                         Text("Approve the request on the AWS page within five minutes. Mountain Turtle will confirm when sign-in finishes.").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
-                if let message = model.loginMessage {
+                if let message = model.loginMessage, !connection.isSFTP {
                     notice(message, symbol: "checkmark.circle", color: moss)
                 }
                 if let message = model.driveMessage {
                     notice(message, symbol: "checkmark.circle", color: moss)
                 }
+                if connection.supportsPhotoBrowser {
                 HStack(spacing: 12) {
                     Image(systemName: "photo.on.rectangle.angled").font(.title2).foregroundStyle(moss)
                     VStack(alignment: .leading, spacing: 4) {
@@ -640,15 +680,36 @@ struct MainView: View {
                     Spacer()
                     Button("Browse photos") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
                 }.padding(16).background(cream).clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+                HStack(spacing: 12) {
+                    Image(systemName: "chart.xyaxis.line").font(.title2).foregroundStyle(moss)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Drive insights").font(.system(size: 13, weight: .semibold))
+                        Text(connection.isSFTP ? "Track transfers, local cache and remote server capacity." : "Track transfers, cloud storage and estimated storage cost.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("View metrics") { model.drivePanel = DrivePanel(connection: connection, kind: .metrics) }
+                }.padding(16).background(cream).clipShape(RoundedRectangle(cornerRadius: 14))
                 Button { model.drivePanel = DrivePanel(connection: connection, kind: .settings) } label: {
                     Label("Download & cache settings", systemImage: "slider.horizontal.3")
                 }.buttonStyle(.link)
                 VStack(spacing: 0) {
-                    infoRow("S3 bucket", connection.bucket, symbol: "shippingbox")
-                    Divider().padding(.leading, 42)
-                    infoRow("AWS profile", connection.profile, symbol: "person.crop.circle")
-                    Divider().padding(.leading, 42)
-                    infoRow("Region", connection.region, symbol: "globe.americas")
+                    if connection.isSFTP {
+                        infoRow("Server", "\(connection.host ?? ""):\(connection.port ?? 22)", symbol: "server.rack")
+                        Divider().padding(.leading, 42)
+                        infoRow("Username", connection.user ?? "", symbol: "person.crop.circle")
+                        Divider().padding(.leading, 42)
+                        infoRow("Folder", connection.remotePath.flatMap { $0.isEmpty ? nil : $0 } ?? "Home folder", symbol: "folder")
+                        Divider().padding(.leading, 42)
+                        infoRow("Sign-in", connection.authenticationLabel, symbol: "key")
+                    } else {
+                        infoRow("S3 bucket", connection.bucket, symbol: "shippingbox")
+                        Divider().padding(.leading, 42)
+                        infoRow("AWS profile", connection.profile, symbol: "person.crop.circle")
+                        Divider().padding(.leading, 42)
+                        infoRow("Region", connection.region, symbol: "globe.americas")
+                    }
                     Divider().padding(.leading, 42)
                     infoRow("Access", connection.readOnly ? "Read only" : "Read & write", symbol: connection.readOnly ? "lock" : "pencil")
                     Divider().padding(.leading, 42)
@@ -658,7 +719,7 @@ struct MainView: View {
                     Image(systemName: "leaf").font(.system(size: 19)).foregroundStyle(moss)
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Download only as needed").font(.system(size: 13, weight: .semibold))
-                        Text("Finder previews can read original photos. Use Browse photos to avoid those full downloads, or turn off icon previews in Finder’s View Options. AWS may occasionally ask you to sign in again.")
+                        Text(connection.isSFTP ? "Finder previews can read original photos. Turn off icon previews in Finder’s View Options to reduce downloads." : "Finder previews can read original photos. Use Browse photos to avoid those full downloads, or turn off icon previews in Finder’s View Options. AWS may occasionally ask you to sign in again.")
                             .font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                     }
                 }.padding(.top, 2)
@@ -707,10 +768,11 @@ struct SetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var installing = false
     @State private var installLog = ""
+    @State private var includeAWS = false
     @State private var message: String?
 
     private var needsToolInstall: Bool {
-        !model.dependencies.awsReady || !model.dependencies.rcloneReady
+        (includeAWS && !model.dependencies.awsReady) || !model.dependencies.rcloneReady
     }
 
     var body: some View {
@@ -729,17 +791,21 @@ struct SetupView: View {
                          state: model.dependencies.installedReady ? .ready : .problem)
                 Divider().padding(.leading, 42)
                 setupRow("AWS CLI v2",
-                         detail: model.dependencies.awsReady ? (model.dependencies.awsVersion ?? "Installed") : "Needed for AWS profiles, SSO, and bucket access.",
-                         state: model.dependencies.awsReady ? .ready : .problem)
+                         detail: model.dependencies.awsReady ? (model.dependencies.awsVersion ?? "Installed") : "Only needed for S3 drives. SFTP works without AWS CLI.",
+                         state: model.dependencies.awsReady ? .ready : model.requiresAWS ? .problem : .waiting)
                 Divider().padding(.leading, 42)
                 setupRow("rclone NFS mounts",
-                         detail: model.dependencies.rcloneReady ? (model.dependencies.rcloneVersion ?? "Installed") : "Needed to show S3 as a macOS network volume.",
+                         detail: model.dependencies.rcloneReady ? (model.dependencies.rcloneVersion ?? "Installed") : "Needed to show S3 and SFTP as macOS network volumes.",
                          state: model.dependencies.rcloneReady ? .ready : .problem)
                 Divider().padding(.leading, 42)
                 setupRow("Finder Network Volumes",
                          detail: model.dependencies.privacyMessage ?? "macOS asks the first time a drive is added to Finder.",
                          state: privacyState)
             }.padding(.horizontal, 16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 16))
+            if !model.dependencies.awsReady {
+                Toggle("Include AWS CLI for S3 connections", isOn: $includeAWS)
+                    .toggleStyle(.checkbox).font(.callout).disabled(installing)
+            }
             HStack(spacing: 10) {
                 if !model.dependencies.installedReady {
                     Button { installApp() } label: { Label("Move to Applications", systemImage: "square.and.arrow.down") }
@@ -777,6 +843,7 @@ struct SetupView: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 640).tint(moss)
+            .onAppear { includeAWS = model.requiresAWS }
     }
 
     private var privacyState: SetupState {
@@ -815,7 +882,7 @@ struct SetupView: View {
         installLog = ""
         if model.dependencies.brew == nil {
             do {
-                try ServiceClient.openTerminalInstaller()
+                try ServiceClient.openTerminalInstaller(includeAWS: includeAWS)
                 message = "The installer is open in Terminal because Homebrew may need your Mac password. Return here and refresh when it finishes."
             } catch {
                 message = error.localizedDescription
@@ -825,14 +892,14 @@ struct SetupView: View {
         installing = true
         Task {
             do {
-                try await ServiceClient.installToolsWithHomebrew { text in
+                try await ServiceClient.installToolsWithHomebrew(includeAWS: includeAWS) { text in
                     Task { @MainActor in
                         installLog += text
                         if installLog.count > 8000 { installLog = String(installLog.suffix(8000)) }
                     }
                 }
                 await model.refresh()
-                message = "AWS CLI and rclone are installed."
+                message = includeAWS ? "AWS CLI and rclone are installed." : "rclone is installed. SFTP connections are ready to set up."
             } catch {
                 message = error.localizedDescription
             }
@@ -846,64 +913,173 @@ struct ConnectionEditor: View {
     var original: Connection?
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var backend = "s3"
     @State private var bucket = ""
     @State private var profile = ""
     @State private var region = "us-east-1"
+    @State private var host = ""
+    @State private var user = ""
+    @State private var port = "22"
+    @State private var remotePath = ""
+    @State private var authMode = "agent"
+    @State private var keyFile = ""
+    @State private var knownHostsFile = "~/.ssh/known_hosts"
+    @State private var password = ""
     @State private var readOnly = true
     @State private var autoConnect = false
     @State private var saving = false
     @State private var failure: String?
 
-    var valid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty && !bucket.trimmingCharacters(in: .whitespaces).isEmpty && !profile.isEmpty && !region.isEmpty }
+    private var isSFTP: Bool { backend == "sftp" }
+    private func trimmed(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var portIsValid: Bool { Int(port).map { (1...65535).contains($0) } ?? false }
+    private var keepsPassword: Bool {
+        original?.isSFTP == true && original?.passwordConfigured == true
+            && trimmed(host) == original?.host && trimmed(user) == original?.user
+            && Int(port) == (original?.port ?? 22)
+    }
+    private var valid: Bool {
+        guard !trimmed(name).isEmpty else { return false }
+        if !isSFTP { return !trimmed(bucket).isEmpty && !trimmed(profile).isEmpty && !trimmed(region).isEmpty }
+        guard !trimmed(host).isEmpty, !trimmed(user).isEmpty, portIsValid, !trimmed(knownHostsFile).isEmpty else { return false }
+        if authMode == "keyFile" && trimmed(keyFile).isEmpty { return false }
+        if authMode == "password" {
+            return (!password.isEmpty || keepsPassword) && !password.contains("\n") && !password.contains("\r")
+        }
+        return true
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 13) {
                 BrandIcon(size: 52)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(original == nil ? "Add an S3 drive" : "Edit connection").font(.system(size: 23, weight: .semibold))
-                    Text("A saved AWS profile keeps your keys out of the app.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(original == nil ? "Add a drive" : "Edit connection").font(.system(size: 23, weight: .semibold))
+                    Text(isSFTP ? "Connect securely to a server over SSH." : "A saved AWS profile keeps your keys out of the app.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
-            Form {
-                TextField("Drive name", text: $name, prompt: Text("e.g. My photos"))
-                TextField("S3 bucket", text: $bucket, prompt: Text("your-bucket-name"))
-                HStack {
-                    TextField("AWS profile", text: $profile, prompt: Text("Choose a saved profile"))
-                    Menu { ForEach(model.profiles, id: \.self) { p in Button(p) { profile = p } } } label: { Image(systemName: "chevron.down") }.menuStyle(.borderlessButton).frame(width: 20).disabled(model.profiles.isEmpty)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Form {
+                        Picker("Connection type", selection: $backend) {
+                            Text("Amazon S3").tag("s3")
+                            Text("SFTP server").tag("sftp")
+                        }.disabled(original != nil)
+                        TextField("Drive name", text: $name, prompt: Text("e.g. My files"))
+                        if isSFTP { sftpFields } else { s3Fields }
+                    }.textFieldStyle(.roundedBorder).font(.system(size: 13))
+                    if isSFTP {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Verify the server first", systemImage: "lock.shield").fontWeight(.medium)
+                            Text("Connect with SSH and verify the server fingerprint with its administrator first. Mountain Turtle requires its trusted key in your known hosts file; unknown or changed keys are rejected.")
+                            if authMode == "agent" {
+                                Text("Load your SSH key into the macOS SSH agent before connecting. An unlocked agent key is required for automatic reconnects.")
+                            } else if authMode == "keyFile" {
+                                Text("For a key protected by a passphrase, load it into your SSH agent and choose SSH agent above.")
+                            } else {
+                                Text(keepsPassword ? "Leave the password blank to keep it for this server and account. Changing the server, username, or port requires a new password." : "Enter a password for this server and account. It will be stored in macOS Keychain.")
+                            }
+                        }.font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else if !model.dependencies.awsReady {
+                        Text("S3 connections need AWS CLI v2. Install it from Mac setup.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 13) {
+                        Toggle("Read only", isOn: $readOnly).toggleStyle(.checkbox)
+                        Text(readOnly ? "Browse and download. Remote changes are disabled." : "Saving, moving, or deleting files in Finder changes the remote files.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 20)
+                        Toggle("Reconnect this drive at login", isOn: $autoConnect).toggleStyle(.checkbox)
+                        Text("Also enable “Restore drives at login” in the main window.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 20)
+                    }.font(.system(size: 12)).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(cream).clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                TextField("AWS region", text: $region)
-            }.textFieldStyle(.roundedBorder).font(.system(size: 13))
-            VStack(alignment: .leading, spacing: 13) {
-                Toggle("Read only", isOn: $readOnly).toggleStyle(.checkbox)
-                Text(readOnly ? "Browse and download. Changes to the bucket are disabled." : "Saving, moving, or deleting files in Finder changes the S3 bucket.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 20)
-                Toggle("Reconnect this drive at login", isOn: $autoConnect).toggleStyle(.checkbox)
-                Text("Also enable “Restore drives at login” in the main window.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 20)
-            }.font(.system(size: 12)).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(cream).clipShape(RoundedRectangle(cornerRadius: 12))
+            }.frame(maxHeight: isSFTP ? 500 : 280)
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
-                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Cancel", role: .cancel) { password = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
-                Button(original == nil ? "Add connection" : "Save changes") {
-                    saving = true
-                    failure = nil
-                    var args = original.map { ["edit", $0.id] } ?? ["add"]
-                    args += ["--name", name.trimmingCharacters(in: .whitespacesAndNewlines), "--bucket", bucket.trimmingCharacters(in: .whitespacesAndNewlines), "--profile", profile, "--region", region]
-                    if readOnly { args.append("--read-only") }
-                    if autoConnect { args.append("--auto-connect") }
-                    Task {
-                        if await model.action(args) { dismiss() }
-                        else { failure = model.error; model.error = nil }
-                        saving = false
-                    }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!valid || saving)
+                Button(original == nil ? "Add connection" : "Save changes") { save() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!valid || saving)
             }
-        }.padding(28).frame(width: 490).tint(moss)
-        .onAppear {
-            if let original { name = original.name; bucket = original.bucket; profile = original.profile; region = original.region; readOnly = original.readOnly; autoConnect = original.autoConnect }
+        }.padding(28).frame(width: 550).tint(moss)
+            .interactiveDismissDisabled(saving)
+            .onAppear {
+                guard let original else { return }
+                name = original.name; backend = original.backend ?? "s3"
+                bucket = original.bucket; profile = original.profile; region = original.region
+                host = original.host ?? ""; user = original.user ?? ""; port = String(original.port ?? 22)
+                remotePath = original.remotePath ?? ""; authMode = original.authMode ?? "agent"
+                keyFile = original.keyFile ?? ""; knownHostsFile = original.knownHostsFile ?? "~/.ssh/known_hosts"
+                readOnly = original.readOnly; autoConnect = original.autoConnect
+            }
+    }
+
+    @ViewBuilder private var s3Fields: some View {
+        TextField("S3 bucket", text: $bucket, prompt: Text("your-bucket-name"))
+        HStack {
+            TextField("AWS profile", text: $profile, prompt: Text("Choose a saved profile"))
+            Menu { ForEach(model.profiles, id: \.self) { p in Button(p) { profile = p } } } label: { Image(systemName: "chevron.down") }
+                .menuStyle(.borderlessButton).frame(width: 20).disabled(model.profiles.isEmpty)
+        }
+        TextField("AWS region", text: $region)
+    }
+
+    @ViewBuilder private var sftpFields: some View {
+        TextField("Server", text: $host, prompt: Text("sftp.example.com"))
+        TextField("Username", text: $user, prompt: Text("Your server username"))
+        TextField("Port", text: $port)
+        if !portIsValid { Text("Enter a port from 1 to 65535.").font(.caption).foregroundStyle(.red) }
+        TextField("Remote folder", text: $remotePath, prompt: Text("Leave blank for your home folder"))
+        Text("Use an absolute path or a path relative to your server home folder.")
+            .font(.caption).foregroundStyle(.secondary)
+        Picker("Authentication", selection: $authMode) {
+            Text("SSH agent").tag("agent")
+            Text("Private key file").tag("keyFile")
+            Text("Password").tag("password")
+        }
+        if authMode == "keyFile" { fileField("Private key", path: $keyFile) }
+        if authMode == "password" {
+            SecureField("Password", text: $password, prompt: Text(keepsPassword ? "Saved in Keychain; leave blank to keep" : "Your server password"))
+        }
+        fileField("Known hosts", path: $knownHostsFile)
+    }
+
+    private func fileField(_ title: String, path: Binding<String>) -> some View {
+        HStack {
+            TextField(title, text: path)
+            Button("Choose…") {
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = true; panel.canChooseDirectories = false
+                panel.allowsMultipleSelection = false; panel.showsHiddenFiles = true
+                panel.title = "Choose \(title.lowercased()) file"
+                let expanded = (path.wrappedValue as NSString).expandingTildeInPath
+                panel.directoryURL = expanded.isEmpty ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh") : URL(fileURLWithPath: expanded).deletingLastPathComponent()
+                if panel.runModal() == .OK, let url = panel.url { path.wrappedValue = url.path }
+            }.accessibilityLabel("Choose \(title.lowercased()) file")
+        }
+    }
+
+    private func save() {
+        saving = true; failure = nil
+        var args = original.map { ["edit", $0.id] } ?? ["add"]
+        args += ["--name", trimmed(name), "--backend", backend]
+        var input: Data?
+        if isSFTP {
+            args += ["--host", trimmed(host), "--user", trimmed(user), "--port", port, "--remote-path", remotePath,
+                     "--auth-mode", authMode, "--key-file", trimmed(keyFile), "--known-hosts-file", trimmed(knownHostsFile)]
+            if authMode == "password", !password.isEmpty {
+                args.append("--password-stdin")
+                input = Data(password.utf8)
+            }
+        } else { args += ["--bucket", trimmed(bucket), "--profile", trimmed(profile), "--region", trimmed(region)] }
+        args.append(readOnly ? "--read-only" : "--read-write")
+        if autoConnect { args.append("--auto-connect") }
+        Task {
+            if await model.action(args, standardInput: input) { password = ""; dismiss() }
+            else { failure = model.error; model.error = nil }
+            saving = false
         }
     }
 }

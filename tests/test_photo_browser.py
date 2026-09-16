@@ -57,6 +57,10 @@ class PhotoTests(unittest.TestCase):
         self.renderer = Mock(side_effect=lambda source, target, pixels: target.write_bytes(b"rendered-thumbnail"))
         self.browser = photo.PhotoBrowser(self.connection, self.paths, self.reader, self.renderer)
 
+    def test_sftp_is_rejected_before_aws_or_file_access(self):
+        with self.assertRaisesRegex(photo.BrowserError, "available for S3"):
+            photo.PhotoBrowser({"id": "test", "backend": "sftp"}, self.paths)
+
     def cache(self, data, key="Portfolio/photo.jpg", etag='"abc"', blocks=None, dirty=False):
         root = self.paths.cache / self.connection["id"]
         original = root / "vfs/volume" / key

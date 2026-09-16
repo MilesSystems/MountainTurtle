@@ -1,82 +1,181 @@
 # Local service protocol (version 1)
 
-CLI: python3 turtle_service.py COMMAND [args]. Output one JSON object. Commands never print credentials. Exit nonzero with {"ok":false,"error":"human explanation"}.
+The saved-record format remains version 1. Records without `backend` are treated
+as S3, preserving existing connections.
 
-status: {"ok":true,"serviceRunning":bool,"launchAtLogin":bool,"dependencies":{"rclone":path-or-null,"aws":path-or-null,"python":path,"brew":path-or-null,"awsVersion":string,"awsCliV2":bool,"rcloneVersion":string,"rcloneNfsmount":bool,"appPath":string,"appInstalled":bool,"privacyState":"approved|needsApproval|checking|unknown","privacyMessage":string},"profiles":[string],"connections":[{"id":UUID,"name":string,"bucket":string,"profile":string,"region":string,"readOnly":bool,"autoConnect":bool,"desiredConnected":bool,"mounted":bool,"state":"disconnected|connecting|connected|disconnecting|needsLogin|error","message":string,"mountPath":string,"updatedAt":number}]}
+```text
+python3 service/turtle_service.py [--resource-dir RESOURCES] COMMAND [args]
+```
 
-add --name NAME --bucket BUCKET --profile PROFILE --region REGION [--read-only] [--auto-connect] -> {"ok":true,"id":UUID}
-edit ID with same fields (only while disconnected)
-remove ID (only disconnected; only local saved connection removed)
-connect ID (starts service if needed)
-disconnect ID (native non-forced unmount; pending uploads wait, busy volume remains connected with explanatory message)
-login ID (start AWS SSO device authorization in the browser; five-minute timeout; no credentials printed or persisted by Turtle)
-autostart on|off (login LaunchAgent registration, preserve running mounts)
-serve (foreground supervisor for launchd)
-shutdown (gracefully disconnect all, preserve cached data, report busy mounts)
+Each command emits one JSON object. Success is `{ "ok": true, ... }`; errors use
+`{ "ok": false, "error": "human explanation" }` and a nonzero exit status.
+Commands do not print credentials. `--resource-dir` selects the packaged resources
+and native helpers; it precedes the command.
 
-## Drive controls (0.2)
+## Status
 
-Status connections also include `cacheMaxSizeMiB` (default 2048) and
-`cacheMaxAgeHours` (default 24). `add` and `edit` accept optional
-`--cache-max-size-mib` and `--cache-max-age-hours`; omitted fields on edit preserve
-the connection's current settings.
+`status` returns `ok`, `serviceRunning`, `launchAtLogin`, `dependencies`,
+`profiles`, and `connections`. The GUI refreshes this every three seconds.
 
-- `settings ID [--cache-max-size-mib N] [--cache-max-age-hours N]`: disconnected
-  only. Size range64..1048576 MiB, age1..8760 hours. Soft eviction targets.
-- `rename ID --name NAME`: disconnected only, preserves bucket and cache identity.
-- `refresh ID`: queues directory-cache invalidation for a mounted drive. This
-  uses rclone's SIGHUP behavior and does not fetch object bodies.
-- `reconnect ID`: queues safe ejection and reconnect. A subsequent disconnect
-  cancels the reconnect intent. Pending writes and busy-volume protection apply.
-- `cache-info ID`: bounded local scan returns `{ok, usedBytes, files, partial}`.
-  Allocated bytes are measured; `partial=true` denotes a lower estimate.
-- `clear-cache ID`: disconnected only, rejects pending or ambiguous write data
-  even if the connection was subsequently made read-only. Deletes local rclone
-  cache only, not explicit Downloads copies or the separate thumbnail cache.
+Dependencies include discovered `rclone`, `aws`, `python`, and `brew` paths;
+`awsVersion`, `awsCliV2`, `rcloneVersion`, `rcloneNfsmount`; `appPath`,
+`appInstalled`; and `privacyState` / `privacyMessage`. Privacy is `approved`,
+`needsApproval`, `checking`, or `unknown`. AWS is required only for S3.
 
-The UI snapshots current connection intent, safely ejects, waits for the prior
-process to finish, then applies rename/settings/clear-cache and restores the
-previous connection intent. Failure cancels a pending ejection when appropriate.
+Every connection includes:
 
-Finder actions use `mountainturtle://connection/UUID?action=ACTION`, where ACTION
-is `finder`, `browse`, `settings`, `rename`, `refresh`, `reconnect`, or `eject`.
-The host accepts exactly one allowlisted query parameter and resolves UUIDs
-against current saved connections. `mountainturtle://open` opens the app.
-No filesystem paths, credentials, or arbitrary commands are accepted in URLs.
+- `id` (UUID), `name`, `backend` (`s3` or `sftp`).
+- `bucket`, `profile`, `region` (empty strings for SFTP).
+- `readOnly`, `autoConnect`, `desiredConnected`, `mounted`.
+- `state`: `disconnected`, `connecting`, `connected`, `disconnecting`,
+  `needsLogin`, or `error`; plus `message`, `mountPath`, and numeric `updatedAt`.
+- `cacheMaxSizeMiB` (default 2048), `cacheMaxAgeHours` (default 24).
+- Optional `sidebarItemID` / `sidebarError` while the drive is mounted.
 
-The supervisor runs the bundled native `Contents/Helpers/Mountain Turtle Sidebar`
-helper with `ensure UUID MOUNT_PATH` once per confirmed mount generation. Work is
-serialized, has an eight-second deadline, and is cancelled on ejection/shutdown.
-Failure never prevents mounting. Status may include `sidebarItemID` or a human
-`sidebarError`. The helper requires an exact kernel NFS mount beneath the user's
-Turtle mount root and updates actual FavoriteVolumes through public SharedFileList
-APIs. A private `sidebar-items.json` registry and ownership markers on the sidebar
-item let it replace its old entry after rename/reconnect without resolving stale
-NFS bookmarks, while leaving unrelated favorites alone. The API is deprecated;
-Finder's manual Add to Sidebar command is the fallback.
+SFTP records additionally include `host`, `user`, `port` (integer, default 22),
+`remotePath`, `authMode`, `keyFile`, `knownHostsFile`, and `passwordConfigured`
+(boolean). Status never includes the password or private-key contents.
 
-The sibling `photo_browser.py` CLI is documented in [PHOTO_BROWSER.md](docs/PHOTO_BROWSER.md).
+`mounted` comes from the kernel mount table and is separate from the service's
+connection state. Neither a running process nor a successful action request
+alone proves remote access.
 
-All action commands return {"ok":true,"message":optional}. GUI polls status every 3 seconds. Backend paths: ~/Library/Application Support/Mountain Turtle, ~/Library/Caches/MountainTurtle, ~/Library/Logs/MountainTurtle. Mount root ~/Mountain Turtle; each display name must be unique and safe as one directory component. No mounts of unrelated buckets. No recursive S3 scans or object mutation during connect/validation. Rclone mounts bind127.0.0.1 with unprivileged native macOS NFS options.
+## Add and edit
 
-CLI accepts --resource-dir PATH before COMMAND to locate packaged icon overlay
-assets. Backend can locate its parent Resources by default. Bundled app
-resources include service/turtle_service.py and icon-overlay-assets; the service
-materializes the dotfile-shaped Finder metadata into its private Application
-Support directory at runtime. Dependencies discovered from explicit standard
-paths + PATH. For app installation, LaunchAgent references the stable service
-script inside the installed .app, not build checkout.
+```text
+add --name NAME [--backend s3] --bucket BUCKET --profile PROFILE --region REGION
+add --name NAME --backend sftp --host HOST --user USER [--port 22]
+    [--remote-path PATH] [--auth-mode agent|keyFile|password]
+    [--key-file PATH] [--known-hosts-file PATH] [--password-stdin]
+edit ID <the same complete connection fields>
+```
 
-## First-run setup (0.3)
+Both commands accept these common flags:
 
-The app surfaces a Mac setup sheet from `status.dependencies`. It checks whether
-the running bundle is installed at `~/Applications/Mountain Turtle.app` or
-`/Applications/Mountain Turtle.app`, whether AWS CLI is version 2, whether
-`rclone nfsmount --help` succeeds, and whether Finder sidebar registration has
-already proven Network Volumes permission. Privacy remains `unknown` until macOS
-has asked or a mounted drive has been added to Finder.
+```text
+[--read-only | --read-write] [--auto-connect]
+[--cache-max-size-mib N] [--cache-max-age-hours N]
+```
 
-If Homebrew is already present, the sheet can run `brew install awscli rclone`
-and stream output in the app. If Homebrew is missing, the sheet writes a bounded
-installer script and opens it in Terminal so Homebrew's official installer can
-use the normal shell and password prompt before installing `awscli` and `rclone`.
+The default is read-only with auto-connect disabled. `--backend` defaults to
+`s3`, including on edit: callers editing SFTP must send `--backend sftp` and the
+complete SFTP fields. Cache fields omitted on edit preserve their previous
+values; other omitted flags use their parser defaults. Success returns the
+saved connection's `id`.
+
+Editing requires a disconnected drive and no pending cached writes. Changing
+the backend or remote destination clears safe local cache before reuse; changing
+a display name alone keeps its cache identity. Names must be unique and safe as
+one directory component beneath `~/Mountain Turtle`.
+
+SFTP constraints:
+
+- `host` is a hostname or IP address, without a scheme or appended port.
+- `port` is 1–65535; `user` is an SSH username without spaces/control characters.
+- Empty `remotePath` selects the server home folder. Absolute and home-relative
+  paths are accepted; `~`, `..` traversal, and control characters are rejected.
+- `authMode` defaults to `agent`. `keyFile` requires a readable existing private
+  key; encrypted keys should be loaded into the SSH agent instead.
+- `knownHostsFile` defaults to `~/.ssh/known_hosts`. Key-file and known-hosts
+  paths must be readable existing files expressed as absolute or `~/` paths.
+  Unknown and changed host keys fail verification; there is no trust-on-first-use
+  or insecure bypass mode.
+- Password authentication requires `--password-stdin` for a new password. The
+  input is at most 16,384 characters without CR, LF, or NUL; the password is never
+  passed in argv. A password-mode edit without input keeps the saved password only when host,
+  user, and port are unchanged; a changed endpoint requires fresh password input.
+  Passwords are stored by the built app's macOS Keychain helper, not in saved
+  JSON or rclone configuration. Switching away from password authentication or
+  removing the record attempts to delete the obsolete Keychain item.
+
+## Lifecycle and drive controls
+
+| Command | Behavior |
+| --- | --- |
+| `connect ID` | Requests connection and starts the service if needed. |
+| `disconnect ID` | Requests native non-forced unmount; pending writes wait and busy mounts remain attached. |
+| `reconnect ID` | Safely ejects and reconnects. A later disconnect cancels reconnect intent. |
+| `remove ID` | Disconnected only; removes the saved record without deleting remote files. |
+| `login ID` | S3 only: AWS SSO device authorization with a five-minute timeout. |
+| `refresh ID` | Mounted only: invalidates rclone directory listings via SIGHUP without fetching file bodies. |
+| `rename ID --name NAME` | Disconnected only; preserves remote destination and cache identity. |
+| `settings ID [--cache-max-size-mib N] [--cache-max-age-hours N]` | Disconnected only; size 64–1,048,576 MiB, age 1–8,760 hours, soft eviction targets. |
+| `cache-info ID` | Bounded local scan returns `ok`, `usedBytes`, `files`, `partial`; partial usage is a lower estimate. |
+| `clear-cache ID` | Disconnected only; rejects pending/ambiguous writes, including previously writable caches. |
+| `autostart on\|off` | Updates the per-user LaunchAgent without stopping current mounts. |
+| `serve [--at-login]` | Foreground supervisor used by launchd. |
+| `shutdown` | Requests safe disconnection of all drives, retains cached data, reports pending mounts. |
+
+Clear-cache affects the local rclone cache, not remote files, explicit Downloads
+copies, or the photo thumbnail cache. The GUI saves connection intent, safely
+ejects, waits, applies rename/settings/clear-cache, then restores that intent.
+
+## Finder actions and helpers
+
+```text
+mountainturtle://connection/UUID?action=ACTION
+mountainturtle://open
+```
+
+Allowed actions are `finder`, `browse`, `metrics`, `settings`, `rename`,
+`refresh`, `reconnect`, and `eject`. The app accepts exactly one allowlisted query
+parameter and resolves UUIDs against current saved records. URLs cannot contain
+filesystem paths, credentials, or arbitrary commands. SFTP `browse` opens Finder
+when mounted and explains that the separate photo browser is S3-only.
+
+The authenticated Finder bridge's `/roots` result includes `supportsPhotoBrowser`
+per root. The extension hides its photo action for SFTP; metrics remain available.
+Bridge tokens and filesystem paths are not accepted through deep links.
+
+The supervisor runs the bundled `Mountain Turtle Sidebar` helper with
+`ensure UUID MOUNT_PATH` once per confirmed mount generation, with serialized
+work, an eight-second deadline, and cancellation on ejection. Failure does not
+prevent mounting. The helper verifies a kernel NFS mount under the Turtle mount
+root and updates owned FavoriteVolumes entries through public SharedFileList
+APIs. Its private registry preserves unrelated Finder favorites. That API is
+deprecated; Finder's manual Add to Sidebar is the fallback.
+
+## Photo and metrics services
+
+The independent `photo_browser.py` CLI is **S3-only**; see
+[photo browser protocol](docs/PHOTO_BROWSER.md).
+
+```text
+python3 service/drive_metrics.py [--resource-dir RESOURCES] snapshot ID
+python3 service/drive_metrics.py [--resource-dir RESOURCES] storage ID [--rate NUMBER]
+```
+
+`snapshot` reads authenticated loopback rclone statistics for either backend,
+returning current values and bounded local history. `storage` reads daily S3
+CloudWatch metrics and automatic public regional storage pricing. For SFTP it
+requests server filesystem statistics and returns `totalBytes` (filesystem
+capacity), `usedBytes`, `freeBytes`, `scope: "remoteFilesystem"`, measurement time,
+and bounded capacity history. Unlike S3's `totalBytes` (stored object bytes),
+SFTP `totalBytes` is capacity: clients must branch by provider. Missing extension
+support returns an unsupported result without a shell or recursive-scan fallback.
+SFTP pricing remains unavailable. `--rate` supplies a blended USD/GiB/month
+assumption instead of fetching prices. Missing measurements and incomplete total
+estimates are `null`, not zero. See [metrics schema, limits, and pricing
+assumptions](docs/METRICS.md).
+
+The metrics dashboard polls local snapshots about every five seconds only while
+open. Cloud data loads once on opening or manual refresh. Its persisted optional
+rate override and storage-growth scenario recalculate locally without cloud calls.
+
+## Paths and setup
+
+State lives under `~/Library/Application Support/Mountain Turtle`, cache under
+`~/Library/Caches/MountainTurtle`, logs under `~/Library/Logs/MountainTurtle`, and
+mounts under `~/Mountain Turtle`. Rclone's NFS and authenticated control listeners
+bind loopback. Connecting does not scan unrelated storage or create a test file.
+SFTP uses no remote shell/hash commands.
+
+Packaged resources include the service scripts and icon-overlay assets. Finder
+metadata is materialized locally, never uploaded to the remote. The LaunchAgent
+references the stable service script inside the installed app.
+
+The setup sheet checks the installed app location, rclone NFS support, AWS CLI
+v2 when needed for S3, and Network Volumes permission. It can install rclone alone
+or include AWS CLI. With no Homebrew, it opens the official Homebrew installer in
+Terminal. Privacy remains unknown until macOS asks or sidebar registration proves
+access; setup does not bypass that permission.
