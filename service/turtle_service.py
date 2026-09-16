@@ -1027,6 +1027,8 @@ def parser():
     result.add_argument("--resource-dir")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("export-connection").add_argument("id")
+    commands.add_parser("inspect-connection")
     for command in ("add", "edit"):
         operation = commands.add_parser(command)
         if command == "edit":
@@ -1062,6 +1064,15 @@ def parser():
 
 
 def action(args, paths):
+    if args.command in ("export-connection", "inspect-connection"):
+        import connection_transfer
+        if args.command == "inspect-connection":
+            # Inspection must not initialize a store, read credentials, or mount.
+            data = sys.stdin.buffer.read(65537)
+            return {"ok": True, "connection": connection_transfer.decode(data)}
+        connection = find_connection(Store(paths).read(), args.id)
+        # Export stdout is the portable document itself, without a CLI envelope.
+        return json.loads(connection_transfer.encode(connection))
     store = Store(paths)
     if args.command == "status":
         return status(paths)

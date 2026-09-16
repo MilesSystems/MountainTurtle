@@ -144,6 +144,38 @@ The dedicated [Harvester SFTP test drive](deploy/sftp-test/README.md) documents 
 LAN fixture, its verified host key, disposable write checks, and recorded live
 verification. It is not required for ordinary server connections.
 
+## Move a connection to another Mac
+
+Choose **Export connection** for a saved drive, then choose the kind of file:
+
+- **Connection settings only** saves a readable `.mountainturtle` file with the
+  drive's name, destination, authentication method, read-only setting, and cache
+  limits. It does not include passwords.
+- **Password-protected file** encrypts those settings with a passphrase you choose.
+  For an SFTP connection using a saved password, it also includes that password.
+  Use a passphrase of at least 12 characters and keep it available for import;
+  Mountain Turtle cannot recover a forgotten export passphrase.
+
+Transfer the file to the other Mac, then drag it into the Mountain Turtle window,
+choose **Import connection**, or open the file in Finder. A protected file asks
+for its passphrase. Review the connection details and choose a unique drive name,
+then choose **Import connection**. Opening or dropping a file does not save a connection or mount
+anything; canceling the review leaves existing drives unchanged. Imported drives
+start with automatic connection disabled.
+
+Both formats exclude SSH private keys, AWS credentials and SSO sessions, local
+key/known-hosts paths, and cached files. Configure the named AWS profile and sign
+in on the receiving Mac, or select that Mac's SSH key and verified known-hosts
+file. For settings-only SFTP password imports, enter the server password again.
+A saved password from a protected import is written to that Mac's Keychain only
+when you choose **Import connection** in the review. The file's read-only setting is preserved,
+so review it before connecting.
+
+Settings-only files expose server, bucket, profile, and username information as
+plain text. Protected files use authenticated AES-256-GCM encryption with a fresh
+salt and nonce and PBKDF2-HMAC-SHA256 passphrase derivation (600,000 iterations).
+Their protection depends on the strength of the passphrase.
+
 ## Finder volumes and login restore
 
 Connected volumes live under `~/Mountain Turtle/<connection name>` and are

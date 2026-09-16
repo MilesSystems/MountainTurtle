@@ -7,7 +7,8 @@ as S3, preserving existing connections.
 python3 service/turtle_service.py [--resource-dir RESOURCES] COMMAND [args]
 ```
 
-Each command emits one JSON object. Success is `{ "ok": true, ... }`; errors use
+Each command emits one JSON object. Except for `export-connection`, success is
+`{ "ok": true, ... }`; errors use
 `{ "ok": false, "error": "human explanation" }` and a nonzero exit status.
 Commands do not print credentials. `--resource-dir` selects the packaged resources
 and native helpers; it precedes the command.
@@ -87,6 +88,78 @@ SFTP constraints:
   Passwords are stored by the built app's macOS Keychain helper, not in saved
   JSON or rclone configuration. Switching away from password authentication or
   removing the record attempts to delete the obsolete Keychain item.
+
+## Portable connection files
+
+```text
+export-connection ID
+inspect-connection < connection.mountainturtle
+```
+
+`export-connection` reads one saved record and emits the portable JSON document
+itself, without an `ok` field. It is safe while the source drive is connected.
+`inspect-connection` reads at most 65,537 bytes from binary stdin, rejects input
+larger than 64 KiB, and returns `{ "ok": true, "connection": { ... } }` with
+validated, normalized editor fields. These commands do not change saved settings,
+credentials, caches, startup registration, or mounts. Inspection does not read
+the connection store; duplicate names are resolved when the reviewed connection
+is added through the existing `add` command.
+
+The settings-only document has this envelope:
+
+```json
+{
+  "format": "io.mountainturtle.connection",
+  "version": 1,
+  "connection": {
+    "name": "Photo archive",
+    "backend": "s3",
+    "bucket": "photo-archive",
+    "profile": "archive-reader",
+    "region": "us-west-2",
+    "readOnly": true,
+    "autoConnect": false,
+    "cacheMaxSizeMiB": 2048,
+    "cacheMaxAgeHours": 24
+  }
+}
+```
+
+SFTP replaces the S3 destination fields with `host`, `user`, `port`, `remotePath`,
+and `authMode`. Only portable settings are exported. Passwords, private keys,
+AWS credentials, local key/known-hosts paths, saved IDs, and runtime state are
+absent. `autoConnect` is always exported and normalized as `false`; source login
+restore preferences do not transfer. Import selects local authentication files.
+Unknown formats/versions, invalid field types
+or values, and malformed documents produce the normal JSON error response.
+
+The GUI offers **Connection settings only** or **Password-protected file** for
+each export. Protected files are created and opened in the native app, not by
+these settings-only CLI commands. The wrapper is JSON with
+`format: "io.mountainturtle.encrypted-connection"`, `version: 1`,
+`cipher: "AES-256-GCM"`, `kdf: "PBKDF2-HMAC-SHA256"`, `iterations: 600000`, a
+base64 `salt` (16 random bytes), and a base64 `sealedBox` (12-byte nonce,
+ciphertext, and 16-byte authentication tag). The derived encryption key is 256
+bits. AES-GCM also authenticates the UTF-8 bytes
+`io.mountainturtle.encrypted-connection\n1\nAES-256-GCM\nPBKDF2-HMAC-SHA256\n600000`,
+where each `\n` is one LF byte and there is no trailing LF. The encrypted payload is JSON containing a base64 `document` with the
+settings-only bytes and, for SFTP password authentication, `sftpPassword`.
+Wrapper input is limited to 256 KiB. Export passphrases require at least 12
+characters and at most 1,024 UTF-8 bytes. Saved SFTP passwords are limited to
+16,384 UTF-8 bytes without CR, LF, or NUL.
+
+For a protected export, the native app reads the selected drive's password from
+the bundled Keychain helper through a private captured pipe and encrypts it in
+memory. It does not pass the password in argv or write a plaintext temporary
+file. Imported passwords reach the existing `add --password-stdin` path only
+after the user chooses **Import connection** in the review. Wrong passphrases or damaged ciphertext do not
+yield connection fields or save anything.
+
+The app registers `.mountainturtle` as the exported type
+`io.mountainturtle.connection`, conforming to `public.json`, with the document
+role `Viewer`. Window drops, **Import connection**, and Finder opens all route
+through validation and the connection editor before an `add` operation. The
+original file and existing connections remain unchanged by opening or canceling.
 
 ## Lifecycle and drive controls
 

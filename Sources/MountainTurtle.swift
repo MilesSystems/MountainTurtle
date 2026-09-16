@@ -7,7 +7,7 @@ import os
 let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
 let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
 let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
-let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.4.0"
+let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.0"
 
 struct Connection: Codable, Identifiable, Equatable {
     var id: String
@@ -279,6 +279,8 @@ enum ServiceClient {
     @Published var serviceError: String?
     @Published var drivePanel: DrivePanel?
     @Published var driveMessage: String?
+    @Published var transferRequest: ConnectionTransferRequest?
+    @Published var otherSheetPresented = false
     private var refreshing = false
     private var timer: Timer?
 
@@ -458,6 +460,7 @@ struct MainView: View {
     @State private var showSetup = false
     @State private var editing: Connection?
     @State private var removing: Connection?
+    @State private var fileDropTargeted = false
     @AppStorage("setupPanelSeenVersion") private var setupPanelSeenVersion = ""
     @Environment(\.openWindow) private var openWindow
 
@@ -495,9 +498,29 @@ struct MainView: View {
         }
         .frame(minWidth: 900, minHeight: 610)
         .tint(moss)
+        .dropDestination(for: URL.self) { urls, _ in
+            model.receiveConnectionFiles(urls)
+            return true
+        } isTargeted: { fileDropTargeted = $0 }
+        .overlay {
+            if fileDropTargeted {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14).fill(cream.opacity(0.95))
+                    RoundedRectangle(cornerRadius: 14).strokeBorder(moss, style: StrokeStyle(lineWidth: 3, dash: [10]))
+                    Label("Drop to review connection", systemImage: "square.and.arrow.down")
+                        .font(.title2.weight(.semibold)).foregroundStyle(moss)
+                }.padding(12).allowsHitTesting(false)
+            }
+        }
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
         .sheet(isPresented: $showSetup) { SetupView(model: model) }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
+        .sheet(item: $model.transferRequest) { request in
+            switch request.kind {
+            case .export(let connection): ConnectionExportView(model: model, connection: connection)
+            case .importFile(let data): ConnectionImportView(model: model, data: data)
+            }
+        }
         .sheet(item: $model.drivePanel) { panel in
             switch panel.kind {
             case .photos: PhotoBrowserView(connection: panel.connection)
@@ -518,9 +541,13 @@ struct MainView: View {
         } message: { Text("This removes the connection from Mountain Turtle. Remote files stay where they are.") }
         .onReceive(NotificationCenter.default.publisher(for: .showTurtleWindow)) { _ in openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         .onChange(of: model.setupNeedsAttention) { _, needsAttention in
-            guard needsAttention, setupPanelSeenVersion != appVersion else { return }
+            guard needsAttention, setupPanelSeenVersion != appVersion,
+                  model.transferRequest == nil, model.activeAction == nil else { return }
             setupPanelSeenVersion = appVersion
             showSetup = true
+        }
+        .onChange(of: showAdd || showSetup || editing != nil || model.drivePanel != nil || removing != nil) { _, presented in
+            model.otherSheetPresented = presented
         }
         .onAppear { model.start() }
     }
@@ -558,12 +585,21 @@ struct MainView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .contentShape(Rectangle())
                         }.buttonStyle(.plain).accessibilityLabel("\(connection.name), \(connection.title)")
+                            .contextMenu {
+                                Button("Export connection…") { model.exportConnection(connection) }
+                                    .disabled(model.activeAction != nil || model.transferRequest != nil)
+                            }
                     }
                 }.padding(.horizontal, 12)
             }
-            Button { showAdd = true } label: {
-                Label("Add connection", systemImage: "plus").frame(maxWidth: .infinity)
-            }.controlSize(.large).padding(.horizontal, 20).padding(.vertical, 18)
+            VStack(spacing: 10) {
+                Button { showAdd = true } label: {
+                    Label("Add connection", systemImage: "plus").frame(maxWidth: .infinity)
+                }.controlSize(.large)
+                Button { model.chooseConnectionFile() } label: {
+                    Label("Import connection…", systemImage: "square.and.arrow.down")
+                }.buttonStyle(.link).disabled(model.activeAction != nil)
+            }.padding(.horizontal, 20).padding(.vertical, 18)
             Divider().padding(.horizontal, 20)
             VStack(alignment: .leading, spacing: 14) {
                 Toggle("Restore drives at login", isOn: Binding(get: { model.launchAtLogin }, set: { value in Task { await model.action(["autostart", value ? "on" : "off"]) } }))
@@ -591,6 +627,8 @@ struct MainView: View {
             Text("Connect an S3 bucket or SFTP server in Finder.\nDownload and cache files as you need them.")
                 .font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(5)
             Button("Add your first connection") { showAdd = true }.buttonStyle(.borderedProminent).controlSize(.large).padding(.top, 6)
+            Text("Or drag a .mountainturtle connection file into this window.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
             HStack(spacing: 24) {
                 Label("S3 & SFTP", systemImage: "network")
                 Label("Finder drives", systemImage: "externaldrive")
@@ -631,6 +669,7 @@ struct MainView: View {
                         Button("Reconnect drive") { Task { await model.action(["reconnect", connection.id]) } }
                         Divider()
                         Button("Edit connection…") { editing = connection }.disabled(connection.isMounted || connection.desiredConnected || connection.isWorking)
+                        Button("Export connection…") { model.exportConnection(connection) }.disabled(model.activeAction != nil)
                         Button("Remove connection…", role: .destructive) { removing = connection }.disabled(connection.isMounted || connection.desiredConnected || connection.isWorking)
                     } label: { Image(systemName: "ellipsis.circle").font(.system(size: 20)) }.menuStyle(.borderlessButton).frame(width: 25)
                 }
@@ -911,6 +950,7 @@ struct SetupView: View {
 struct ConnectionEditor: View {
     @ObservedObject var model: AppModel
     var original: Connection?
+    var imported: ConnectionImportDraft? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var backend = "s3"
@@ -954,18 +994,26 @@ struct ConnectionEditor: View {
             HStack(spacing: 13) {
                 BrandIcon(size: 52)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(original == nil ? "Add a drive" : "Edit connection").font(.system(size: 23, weight: .semibold))
+                    Text(imported != nil ? "Review imported connection" : original == nil ? "Add a drive" : "Edit connection").font(.system(size: 23, weight: .semibold))
                     Text(isSFTP ? "Connect securely to a server over SSH." : "A saved AWS profile keeps your keys out of the app.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if imported != nil {
+                        Text(importNotice).font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let imported {
+                            Text("Cache: \(imported.connection.cacheMaxSizeMiB ?? 2048) MiB, \(imported.connection.cacheMaxAgeHours ?? 24) hours. You can change this in Download & cache settings.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Form {
                         Picker("Connection type", selection: $backend) {
                             Text("Amazon S3").tag("s3")
                             Text("SFTP server").tag("sftp")
-                        }.disabled(original != nil)
+                        }.disabled(original != nil || imported != nil)
                         TextField("Drive name", text: $name, prompt: Text("e.g. My files"))
                         if isSFTP { sftpFields } else { s3Fields }
                     }.textFieldStyle(.roundedBorder).font(.system(size: 13))
@@ -1000,20 +1048,34 @@ struct ConnectionEditor: View {
                 Button("Cancel", role: .cancel) { password = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
-                Button(original == nil ? "Add connection" : "Save changes") { save() }
+                Button(imported != nil ? "Import connection" : original == nil ? "Add connection" : "Save changes") { save() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!valid || saving)
             }
         }.padding(28).frame(width: 550).tint(moss)
             .interactiveDismissDisabled(saving)
             .onAppear {
-                guard let original else { return }
-                name = original.name; backend = original.backend ?? "s3"
-                bucket = original.bucket; profile = original.profile; region = original.region
-                host = original.host ?? ""; user = original.user ?? ""; port = String(original.port ?? 22)
-                remotePath = original.remotePath ?? ""; authMode = original.authMode ?? "agent"
-                keyFile = original.keyFile ?? ""; knownHostsFile = original.knownHostsFile ?? "~/.ssh/known_hosts"
-                readOnly = original.readOnly; autoConnect = original.autoConnect
+                guard let source = original ?? imported?.connection else { return }
+                name = source.name; backend = source.backend ?? "s3"
+                bucket = source.bucket; profile = source.profile; region = source.region
+                host = source.host ?? ""; user = source.user ?? ""; port = String(source.port ?? 22)
+                remotePath = source.remotePath ?? ""; authMode = source.authMode ?? "agent"
+                keyFile = source.keyFile ?? ""; knownHostsFile = source.knownHostsFile ?? "~/.ssh/known_hosts"
+                readOnly = source.readOnly; autoConnect = original?.autoConnect ?? false
+                password = imported?.password ?? ""
             }
+            .onChange(of: [host, user, port]) { _, _ in
+                if let source = imported?.connection,
+                   trimmed(host) != source.host || trimmed(user) != source.user || Int(port) != source.port {
+                    password = ""
+                }
+            }
+    }
+
+    private var importNotice: String {
+        let start = "Review these settings before saving a new connection. It will stay disconnected until you choose Connect drive. "
+        if !isSFTP { return start + "Choose an AWS profile configured on this Mac; AWS credentials are not included." }
+        if imported?.password != nil { return start + "The included SFTP password will be saved in this Mac’s Keychain. Verify the server and choose a local known hosts file." }
+        return start + "Set up authentication and the trusted server key on this Mac. Passwords and SSH key files are not included."
     }
 
     @ViewBuilder private var s3Fields: some View {
@@ -1075,9 +1137,17 @@ struct ConnectionEditor: View {
             }
         } else { args += ["--bucket", trimmed(bucket), "--profile", trimmed(profile), "--region", trimmed(region)] }
         args.append(readOnly ? "--read-only" : "--read-write")
+        if let imported {
+            args += ["--cache-max-size-mib", String(imported.connection.cacheMaxSizeMiB ?? 2048),
+                     "--cache-max-age-hours", String(imported.connection.cacheMaxAgeHours ?? 24)]
+        }
         if autoConnect { args.append("--auto-connect") }
         Task {
-            if await model.action(args, standardInput: input) { password = ""; dismiss() }
+            if await model.action(args, standardInput: input) {
+                password = ""
+                if imported != nil { model.driveMessage = "Connection imported. Choose Connect drive when you are ready." }
+                dismiss()
+            }
             else { failure = model.error; model.error = nil }
             saving = false
         }
@@ -1128,6 +1198,11 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: \.isFileURL) {
+            showWindow()
+            AppModel.shared.receiveConnectionFiles(urls)
+            return
+        }
         Logger(subsystem: "io.mountainturtle.app", category: "actions").notice("Received a Finder URL action.")
         guard let url = urls.first, url.scheme == "mountainturtle" else { return }
         showWindow()
@@ -1143,7 +1218,17 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
             .defaultSize(width: 970, height: 680)
             .windowResizability(.contentMinSize)
             .commands {
-                CommandGroup(replacing: .newItem) { Button("Show connections") { NotificationCenter.default.post(name: .showTurtleWindow, object: nil) }.keyboardShortcut("n") }
+                CommandGroup(replacing: .newItem) {
+                    Button("Show connections") { NotificationCenter.default.post(name: .showTurtleWindow, object: nil) }.keyboardShortcut("n")
+                    Button("Import connection…") {
+                        NotificationCenter.default.post(name: .showTurtleWindow, object: nil)
+                        model.chooseConnectionFile()
+                    }.keyboardShortcut("o").disabled(model.activeAction != nil || model.transferRequest != nil || model.otherSheetPresented)
+                    Button("Export connection…") {
+                        if let connection = model.selected { model.exportConnection(connection) }
+                    }.keyboardShortcut("e", modifiers: [.command, .shift])
+                        .disabled(model.selected == nil || model.activeAction != nil || model.transferRequest != nil || model.otherSheetPresented)
+                }
                 CommandGroup(replacing: .help) { Button("Mountain Turtle Help") { model.openGuide() } }
             }
     }
