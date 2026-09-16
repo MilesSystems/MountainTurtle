@@ -63,10 +63,11 @@ That document records completed fixture checks separately from this checklist.
 
 ## Connection export and import
 
-- [ ] Export an S3 drive and each SFTP authentication mode. Verify every export
-  asks for **Connection settings only** or **Password-protected file** and uses
-  a native save panel with the `.mountainturtle` extension. Cancel the export
-  options or save panel; no file should be created and the source stays unchanged.
+- [ ] Export an S3 drive and each SFTP authentication mode. Verify the native
+  save panel defaults to `.turtle`. For a key-file connection, **Ready to connect on another Mac**
+  and password protection start selected; allow settings only and an unprotected
+  complete setup. Cancel the export options or save panel; no file should be
+  created and the source stays unchanged.
 - [ ] Inspect a settings-only fixture: include destination, access mode, and cache
   limits; exclude passwords, AWS credentials, private keys, local file paths,
   saved IDs, mount state, and login restore preferences. Export a connected
@@ -75,10 +76,17 @@ That document records completed fixture checks separately from this checklist.
   Verify the file contains neither plaintext settings nor the password. Try a
   short passphrase, mismatched confirmation, a wrong import passphrase, and damaged
   ciphertext; each should show a useful error without saving a connection.
+- [ ] Export a disposable key-file fixture as a complete setup, both with and
+  without password protection. Verify it includes a usable private key and only
+  that endpoint's verified host keys, with no source paths or unrelated trust
+  entries. Verify encrypted SSH private keys and missing/mismatched server trust
+  fail clearly without exporting an incomplete ready-to-connect file.
 - [ ] On another Mac or an isolated receiving account, drag each format into the
-  app window. Check that protected imports ask for the passphrase and both formats
-  show the connection editor with auto-connect disabled before saving anything.
-- [ ] Open the same files through **Import connection**, Finder double-click,
+  app window. Protected imports ask for the passphrase. Complete setups show a
+  simple drive/account/server review and **Connect now** selected; settings-only
+  imports show the editor with auto-connect disabled. Nothing is saved before
+  the recipient chooses the add/import button.
+- [ ] Open new `.turtle` and legacy `.mountainturtle` files through **Import connection**, Finder double-click,
   and Finder open when the app is initially closed. Verify the connection review
   appears for each route; test multiple incoming files without silently losing any.
 - [ ] Cancel the passphrase prompt and connection review. Existing records,
@@ -87,9 +95,20 @@ That document records completed fixture checks separately from this checklist.
 - [ ] Import a file whose drive name already exists. Choose a unique name in the
   editor and choose **Import connection**; verify the original remains unchanged with
   its own identity. Repeated imports must not overwrite an existing record.
+- [ ] Add a complete setup with **Connect now** enabled. Verify that it saves a
+  fresh identity and connects using only app-managed files, without manual SSH
+  setup. Turn Connect now off on another import and verify it stays disconnected.
+  In both cases login preferences remain unchanged.
+- [ ] Check imported credential directories are `0700` and key/known-hosts files
+  are `0600`. Verify no global `~/.ssh` or SSH config changes. Force a save failure
+  and confirm only newly staged credentials are rolled back. Force a connection
+  failure after a successful save and confirm the saved drive can be retried.
 - [ ] Import empty, malformed, oversized, unsupported-version, invalid-field, and
   unrelated files. Dropping a folder must fail clearly without scanning it. Errors
   must not reveal file contents or passwords or create connection records.
+- [ ] Reject complete setups with malformed private keys, encrypted
+  private keys, wildcard/extra-host trust, a different port, traversal paths,
+  unexpected fields, or a backend/authentication mode other than SFTP keyFile.
 - [ ] For S3, select/configure the receiving Mac's AWS profile and sign in before
   connecting. For SFTP, use that Mac's verified known-hosts file and available SSH
   key/agent, or enter the password for a settings-only import. Verify unknown or
@@ -98,8 +117,9 @@ That document records completed fixture checks separately from this checklist.
   the password is stored in the receiving Mac's Keychain, absent from saved JSON
   and logs, and can authenticate after saving. Do not infer cross-computer proof
   from same-process encryption round-trip tests.
-- [ ] Review the imported read-only setting and cache limits. Saving the import
-  must leave it disconnected and leave login startup preferences unchanged.
+- [ ] Review the imported read-only setting and cache limits. Both import flows
+  preserve these limits and leave login startup preferences unchanged. A
+  settings-only import remains disconnected until explicitly connected.
 
 ## Real Finder volume and one photo read
 

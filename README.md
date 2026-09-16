@@ -20,8 +20,9 @@ for storage, requests, and data transfer.
   and an AWS profile with access to the bucket. S3 storage metrics also need
   `cloudwatch:GetMetricData` permission. Actual spend needs Cost Explorer access
   (`ce:GetCostAndUsage`); these extra insights permissions are independent of mounting.
-- **For SFTP:** a server account, a verified server key in a local known-hosts
-  file, and an SSH agent key, private key file, or password.
+- **For SFTP:** a ready-to-connect `.turtle` file, or a server account, a verified
+  server key in a local known-hosts file, and an SSH agent key, private key file,
+  or password.
 - Apple's Xcode Command Line Tools to build from source (`xcode-select --install`).
 
 Check the tools before building:
@@ -146,35 +147,45 @@ verification. It is not required for ordinary server connections.
 
 ## Move a connection to another Mac
 
-Choose **Export connection** for a saved drive, then choose the kind of file:
+Mountain Turtle 0.6 exports a single `.turtle` file. Send that file to the other
+Mac, then double-click it in Finder, drag it into Mountain Turtle, or choose
+**Import connection**. Older `.mountainturtle` files still open.
 
-- **Connection settings only** saves a readable `.mountainturtle` file with the
-  drive's name, destination, authentication method, read-only setting, and cache
-  limits. It does not include passwords.
-- **Password-protected file** encrypts those settings with a passphrase you choose.
-  For an SFTP connection using a saved password, it also includes that password.
-  Use a passphrase of at least 12 characters and keep it available for import;
-  Mountain Turtle cannot recover a forgotten export passphrase.
+For an SFTP connection that uses a private key, **Export connection** offers
+**Ready to connect on another Mac**. This includes the connection settings, its unencrypted SSH
+private key, and the verified keys for that server. Password protection is on by
+default; the exporter can turn it off. A protected file asks for its export
+password when opened. The recipient sees the drive name, account, and server,
+then chooses **Add connection**. **Connect now** is selected by default and can
+be turned off. No separate key files or SSH configuration are needed.
 
-Transfer the file to the other Mac, then drag it into the Mountain Turtle window,
-choose **Import connection**, or open the file in Finder. A protected file asks
-for its passphrase. Review the connection details and choose a unique drive name,
-then choose **Import connection**. Opening or dropping a file does not save a connection or mount
-anything; canceling the review leaves existing drives unchanged. Imported drives
-start with automatic connection disabled.
+The app installs these credentials in its own Application Support folder, with
+private permissions, and saves the drive under a new identity. It does not edit
+`~/.ssh`, SSH configuration, or other drives. Opening a file and canceling its
+review saves nothing. A duplicate name gets a suggested unique name; importing
+again never replaces an existing drive. Connect now does not enable connection
+at login.
 
-Both formats exclude SSH private keys, AWS credentials and SSO sessions, local
-key/known-hosts paths, and cached files. Configure the named AWS profile and sign
-in on the receiving Mac, or select that Mac's SSH key and verified known-hosts
-file. For settings-only SFTP password imports, enter the server password again.
-A saved password from a protected import is written to that Mac's Keychain only
-when you choose **Import connection** in the review. The file's read-only setting is preserved,
-so review it before connecting.
+**Connection settings only** remains available for SFTP and S3. It includes the
+name, destination, authentication method, read-only setting, and cache limits.
+On the receiving Mac, review the settings and select local SSH credentials or
+configure and sign in to the named AWS profile before connecting. For an SFTP
+connection that uses a saved password, a password-protected export also includes
+that password; an unprotected settings export never does. Imported saved
+passwords are written to Keychain only when the reviewed connection is saved.
+Settings-only imports start disconnected.
 
-Settings-only files expose server, bucket, profile, and username information as
-plain text. Protected files use authenticated AES-256-GCM encryption with a fresh
-salt and nonce and PBKDF2-HMAC-SHA256 passphrase derivation (600,000 iterations).
-Their protection depends on the strength of the passphrase.
+Exports never include AWS credentials, SSO sessions, cached files, the sender's
+local file paths, or global SSH trust settings. Ready-to-connect exports require
+an unencrypted private key file; encrypted SSH keys used through an agent remain
+settings-only. All imports preserve the source read-only setting and cache
+limits, and leave login startup preferences unchanged.
+
+An unprotected ready-to-connect file contains a working private key, so anyone
+with that file can use the account. Password-protected files use authenticated
+AES-256-GCM encryption with a fresh salt and nonce and PBKDF2-HMAC-SHA256
+passphrase derivation (600,000 iterations). Use at least 12 characters and share
+the password separately; Mountain Turtle cannot recover a forgotten password.
 
 ## Finder volumes and login restore
 

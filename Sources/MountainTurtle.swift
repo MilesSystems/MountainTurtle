@@ -7,7 +7,7 @@ import os
 let moss = Color(red: 0.18, green: 0.37, blue: 0.29)
 let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
 let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
-let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.0"
+let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.6.0"
 
 struct Connection: Codable, Identifiable, Equatable {
     var id: String
@@ -627,7 +627,7 @@ struct MainView: View {
             Text("Connect an S3 bucket or SFTP server in Finder.\nDownload and cache files as you need them.")
                 .font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(5)
             Button("Add your first connection") { showAdd = true }.buttonStyle(.borderedProminent).controlSize(.large).padding(.top, 6)
-            Text("Or drag a .mountainturtle connection file into this window.")
+            Text("Or open a .turtle file to add a connection.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             HStack(spacing: 24) {
                 Label("S3 & SFTP", systemImage: "network")

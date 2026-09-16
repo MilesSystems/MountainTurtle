@@ -7,11 +7,15 @@ as S3, preserving existing connections.
 python3 service/turtle_service.py [--resource-dir RESOURCES] COMMAND [args]
 ```
 
-Each command emits one JSON object. Except for `export-connection`, success is
+Each command emits one JSON object. Except for `export-connection` and
+`export-setup`, success is
 `{ "ok": true, ... }`; errors use
 `{ "ok": false, "error": "human explanation" }` and a nonzero exit status.
-Commands do not print credentials. `--resource-dir` selects the packaged resources
-and native helpers; it precedes the command.
+Status, inspection, and error responses do not print credentials. `export-setup`
+returns private key material to the native app's captured pipe and refuses a
+terminal as stdout. Treat its document output as a credential, not diagnostic
+output. `--resource-dir` selects the packaged resources and native helpers; it
+precedes the command.
 
 ## Status
 
@@ -93,7 +97,7 @@ SFTP constraints:
 
 ```text
 export-connection ID
-inspect-connection < connection.mountainturtle
+inspect-connection < connection.turtle
 ```
 
 `export-connection` reads one saved record and emits the portable JSON document
@@ -133,33 +137,90 @@ restore preferences do not transfer. Import selects local authentication files.
 Unknown formats/versions, invalid field types
 or values, and malformed documents produce the normal JSON error response.
 
-The GUI offers **Connection settings only** or **Password-protected file** for
-each export. Protected files are created and opened in the native app, not by
-these settings-only CLI commands. The wrapper is JSON with
+The native app additionally uses these commands for complete key setups:
+
+```text
+export-setup ID
+inspect-setup < connection.turtle
+import-setup --name NAME < connection.turtle
+```
+
+`export-setup` emits the setup document itself, without an `ok` field, through a
+captured pipe. `inspect-setup` returns only `{ "ok": true, "connection": { ... } }`
+after validating the entire document; private key material is never echoed by
+inspection. `import-setup` accepts the reviewed name and setup document, installs
+credentials, and returns `{ "ok": true, "id": "UUID" }`. It saves a disconnected
+drive; the GUI sends `connect ID` separately if Connect now is selected. These
+commands accept the unwrapped setup document. Protected files are decrypted in
+the native app before inspection or import.
+
+The complete SFTP key setup document contains exactly five fields:
+
+| Field | Content |
+| --- | --- |
+| `format` | `"io.mountainturtle.setup"` |
+| `version` | Integer `1` |
+| `connection` | Validated portable SFTP settings, using `authMode: "keyFile"` |
+| `privateKey` | Canonical base64 encoding of one unencrypted SSH private key |
+| `knownHosts` | Canonical base64 encoding of pinned known-hosts entries for the exact destination host and port |
+
+The document is JSON, not a ZIP archive. Its maximum size is 64 KiB; decoded
+private keys are limited to 32 KiB and decoded known-hosts content to 16 KiB.
+Export can filter a source known-hosts file up to 4 MiB. Hashed host entries that
+match the endpoint are accepted and normalized to explicit endpoint entries.
+Wildcard, negated, comma-separated alias, marker/CA, and unrelated-host entries
+are not imported. Duplicate JSON fields and unsupported fields are rejected.
+Key validation supports Ed25519, RSA, and NIST P-256/P-384/P-521 ECDSA keys and
+runs bounded, noninteractive local checks; validation never connects to a
+server. No public key file needs to be transferred separately.
+
+The setup cannot install arbitrary archive members, local paths, global trust
+entries, or SSH configuration. AWS credentials are not supported. The
+settings-only CLI commands above retain their existing scope.
+
+The key-file export UI defaults to **Ready to connect on another Mac** with password protection
+enabled. The exporter can choose settings only or turn protection off for a
+complete key setup. An unprotected complete setup contains a usable private key.
+Saved SFTP passwords are included only in protected exports. Protected files are
+created and opened in the native app. The wrapper is JSON with
 `format: "io.mountainturtle.encrypted-connection"`, `version: 1`,
 `cipher: "AES-256-GCM"`, `kdf: "PBKDF2-HMAC-SHA256"`, `iterations: 600000`, a
 base64 `salt` (16 random bytes), and a base64 `sealedBox` (12-byte nonce,
 ciphertext, and 16-byte authentication tag). The derived encryption key is 256
 bits. AES-GCM also authenticates the UTF-8 bytes
 `io.mountainturtle.encrypted-connection\n1\nAES-256-GCM\nPBKDF2-HMAC-SHA256\n600000`,
-where each `\n` is one LF byte and there is no trailing LF. The encrypted payload is JSON containing a base64 `document` with the
-settings-only bytes and, for SFTP password authentication, `sftpPassword`.
+where each `\n` is one LF byte and there is no trailing LF. The encrypted payload
+is JSON containing a base64 `document` with either settings-only or complete
+setup bytes and, for SFTP password authentication, `sftpPassword`.
 Wrapper input is limited to 256 KiB. Export passphrases require at least 12
 characters and at most 1,024 UTF-8 bytes. Saved SFTP passwords are limited to
 16,384 UTF-8 bytes without CR, LF, or NUL.
 
-For a protected export, the native app reads the selected drive's password from
+For a protected SFTP password export, the native app reads the selected drive's password from
 the bundled Keychain helper through a private captured pipe and encrypts it in
 memory. It does not pass the password in argv or write a plaintext temporary
 file. Imported passwords reach the existing `add --password-stdin` path only
 after the user chooses **Import connection** in the review. Wrong passphrases or damaged ciphertext do not
 yield connection fields or save anything.
 
-The app registers `.mountainturtle` as the exported type
-`io.mountainturtle.connection`, conforming to `public.json`, with the document
-role `Viewer`. Window drops, **Import connection**, and Finder opens all route
-through validation and the connection editor before an `add` operation. The
-original file and existing connections remain unchanged by opening or canceling.
+The app exports `.turtle` by default and accepts legacy `.mountainturtle` files.
+Both extensions are registered for Mountain Turtle JSON connection documents
+with the document role `Viewer`. A `.turtle` file can hold a settings-only
+document, a complete setup document, or the encrypted wrapper. Window drops,
+**Import connection**, and Finder opens share the same validated import path.
+
+Complete setups present a simple name/account/server review. **Add connection**
+creates a new saved identity and installs the key and pinned known-hosts file
+under an app-owned, per-UUID Application Support directory, with directory mode
+`0700` and file mode `0600`. Imported paths never determine the installation
+location. Failed saves roll back the new credential directory; a later connection
+failure leaves the saved drive available to retry. **Connect now** defaults to
+true but can be disabled. This does not set `autoConnect` or change login startup
+preferences. Duplicate imports never overwrite saved connections or credentials.
+
+Settings-only documents retain the full editor and start disconnected after
+saving. The original file and existing connections remain unchanged by opening
+or canceling either review. No import modifies global `~/.ssh` files or config.
 
 ## Lifecycle and drive controls
 

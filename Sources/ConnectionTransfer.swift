@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 extension UTType {
     static let mountainTurtleConnection = UTType(exportedAs: "io.mountainturtle.connection", conformingTo: .json)
+    static let turtleSetup = UTType(exportedAs: "io.mountainturtle.setup", conformingTo: .json)
 }
 
 struct ConnectionTransferRequest: Identifiable {
@@ -40,12 +41,13 @@ struct PortableConnection: Decodable {
 struct ConnectionImportDraft {
     var connection: Connection
     var password: String?
+    var setupDocument: Data? = nil
 }
 
 enum ConnectionTransferIO {
     static func read(_ url: URL) throws -> Data {
-        guard url.isFileURL, url.pathExtension.lowercased() == "mountainturtle" else {
-            throw TurtleError(message: "Choose a Mountain Turtle connection file ending in .mountainturtle.")
+        guard url.isFileURL, ["turtle", "mountainturtle"].contains(url.pathExtension.lowercased()) else {
+            throw TurtleError(message: "Choose a Mountain Turtle connection file ending in .turtle or .mountainturtle.")
         }
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
@@ -68,12 +70,14 @@ enum ConnectionTransferIO {
             throw TurtleError(message: "This connection file is empty or too large.")
         }
         struct Inspection: Decodable { let connection: PortableConnection }
-        let response = try await ServiceClient.run(["inspect-connection"], standardInput: document)
+        let isSetup = (try? JSONSerialization.jsonObject(with: document) as? [String: Any])?["format"] as? String == "io.mountainturtle.setup"
+        let response = try await ServiceClient.run([isSetup ? "inspect-setup" : "inspect-connection"], standardInput: document)
         let portable = try JSONDecoder().decode(Inspection.self, from: response).connection
         guard password == nil || (portable.backend == "sftp" && portable.authMode == "password") else {
             throw TurtleError(message: "The saved password does not match this connection's authentication type.")
         }
-        return ConnectionImportDraft(connection: portable.connection, password: password)
+        return ConnectionImportDraft(connection: portable.connection, password: password,
+                                     setupDocument: isSetup ? document : nil)
     }
 
     static func savedPassword(for connection: Connection) async throws -> String {
@@ -131,7 +135,7 @@ enum ConnectionTransferIO {
         let panel = NSOpenPanel()
         panel.title = "Import connection"
         panel.prompt = "Review connection"
-        panel.allowedContentTypes = [.mountainTurtleConnection]
+        panel.allowedContentTypes = [.turtleSetup, .mountainTurtleConnection]
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         activeAction = "choosing-connection"
@@ -172,12 +176,14 @@ struct ConnectionExportView: View {
     let connection: Connection
     @Environment(\.dismiss) private var dismiss
     @State private var protect = false
+    @State private var includeSetup = true
     @State private var password = ""
     @State private var confirmation = ""
     @State private var working = false
     @State private var failure: String?
 
     private var includesPassword: Bool { connection.isSFTP && connection.authMode == "password" }
+    private var canIncludeSetup: Bool { connection.isSFTP && connection.authMode == "keyFile" }
     private var valid: Bool {
         !protect || (password.count >= ConnectionEncryption.minimumPasswordLength
             && password.utf8.count <= ConnectionEncryption.maximumPasswordBytes && password == confirmation)
@@ -187,21 +193,35 @@ struct ConnectionExportView: View {
         VStack(alignment: .leading, spacing: 20) {
             Label("Export connection", systemImage: "square.and.arrow.up").font(.title2.weight(.semibold))
             Text(connection.name).font(.headline)
-            Picker("Include in this file", selection: $protect) {
-                Text("Connection settings only").tag(false)
-                Text("Password-protected file").tag(true)
-            }.pickerStyle(.radioGroup).disabled(working)
-            Text(protect
-                 ? (includesPassword ? "Encrypt the connection settings and saved SFTP password. Share the export password separately with the person importing this file." : "Encrypt the connection settings. This connection has no saved SFTP password to include.")
-                 : "Save the connection settings without passwords. Sign in again on the other Mac.")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if canIncludeSetup {
+                Picker("Include in this file", selection: $includeSetup) {
+                    Text("Ready to connect on another Mac").tag(true)
+                    Text("Connection settings only").tag(false)
+                }.pickerStyle(.radioGroup).disabled(working)
+                Text(includeSetup
+                     ? "Includes this account’s sign-in key and trusted server details. The recipient just opens the file and adds the connection."
+                     : "The recipient will need to choose their own sign-in key and trusted server file.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Toggle("Protect this file with a password", isOn: $protect).toggleStyle(.checkbox).disabled(working)
+            } else {
+                Picker("Include in this file", selection: $protect) {
+                    Text("Connection settings only").tag(false)
+                    Text("Password-protected file").tag(true)
+                }.pickerStyle(.radioGroup).disabled(working)
+                Text(protect
+                     ? (includesPassword ? "Encrypt the connection settings and saved SFTP password. Share the export password separately with the person importing this file." : "Encrypt the connection settings. This connection has no saved SFTP password to include.")
+                     : "Save the connection settings without passwords. Sign in again on the other Mac.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if protect {
                 SecureField("Export password", text: $password).disabled(working)
                 SecureField("Confirm export password", text: $confirmation).disabled(working)
                 Text("Use at least 12 characters. You will need this password to import the file.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("AWS sign-in, SSH private keys, and trusted server files stay on this Mac. Set those up on the receiving Mac when needed.")
+            Text(canIncludeSetup && includeSetup
+                 ? (protect ? "Share the password separately from the file." : "Anyone with this file can use this account. Share it only with the intended person.")
+                 : "AWS sign-in is not included. Settings-only files do not include SSH keys or trusted server files.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let failure { Text(failure).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             HStack {
@@ -212,17 +232,19 @@ struct ConnectionExportView: View {
             }.disabled(working)
         }.textFieldStyle(.roundedBorder).padding(28).frame(width: 510).tint(moss)
             .interactiveDismissDisabled(working)
+            .onAppear { if canIncludeSetup { protect = true } }
     }
 
     private func export() {
         guard valid, !working else { return }
         let shouldProtect = protect
+        let shouldIncludeSetup = canIncludeSetup && includeSetup
         let passphrase = password
         working = true; failure = nil
         let panel = NSSavePanel()
         panel.title = "Export connection"
-        panel.nameFieldStringValue = connection.name + ".mountainturtle"
-        panel.allowedContentTypes = [.mountainTurtleConnection]
+        panel.nameFieldStringValue = connection.name + ".turtle"
+        panel.allowedContentTypes = [.turtleSetup]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.begin { response in
@@ -230,7 +252,7 @@ struct ConnectionExportView: View {
                 defer { working = false }
                 guard response == .OK, let url = panel.url else { return }
                 do {
-                    let document = try await ServiceClient.run(["export-connection", connection.id])
+                    let document = try await ServiceClient.run([shouldIncludeSetup ? "export-setup" : "export-connection", connection.id])
                     var result = document
                     if shouldProtect {
                         let secret = includesPassword ? try await ConnectionTransferIO.savedPassword(for: connection) : nil
@@ -249,7 +271,7 @@ struct ConnectionExportView: View {
                         _ = try FileManager.default.replaceItemAt(url, withItemAt: staging, options: .usingNewMetadataOnly)
                     } else { try FileManager.default.moveItem(at: staging, to: url) }
                     password = ""; confirmation = ""
-                    model.driveMessage = "Connection exported. Drag the .mountainturtle file into Mountain Turtle on the other Mac to import it."
+                    model.driveMessage = "Connection exported. Open the .turtle file on the other Mac to add it to Mountain Turtle."
                     dismiss()
                 } catch { failure = error.localizedDescription }
             }
@@ -269,7 +291,11 @@ struct ConnectionImportView: View {
     var body: some View {
         Group {
             if let draft {
-                ConnectionEditor(model: model, original: nil, imported: draft)
+                if let document = draft.setupDocument {
+                    ConnectionSetupImportView(model: model, connection: draft.connection, document: document)
+                } else {
+                    ConnectionEditor(model: model, original: nil, imported: draft)
+                }
             } else {
                 VStack(alignment: .leading, spacing: 20) {
                     Label("Import connection", systemImage: "square.and.arrow.down").font(.title2.weight(.semibold))
@@ -316,6 +342,92 @@ struct ConnectionImportView: View {
                 password = ""
                 draft = imported
             } catch { failure = error.localizedDescription }
+        }
+    }
+}
+
+/// Complete setup files get a small review instead of the advanced editor.
+/// The endpoint stays fixed so its included key and server pin cannot be reused
+/// accidentally for a different server while reviewing the file.
+struct ConnectionSetupImportView: View {
+    @ObservedObject var model: AppModel
+    let connection: Connection
+    let document: Data
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var connectNow = true
+    @State private var saving = false
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                BrandIcon(size: 52)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Your drive is ready to add").font(.title2.weight(.semibold))
+                    Text("Your connection settings and sign-in key are included.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            TextField("Drive name", text: $name).textFieldStyle(.roundedBorder).disabled(saving)
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Account", value: connection.user ?? "")
+                LabeledContent("Server", value: serverLabel)
+                LabeledContent("Access", value: connection.readOnly ? "View and download" : "View and make changes")
+            }.font(.callout).padding(16).background(cream).clipShape(RoundedRectangle(cornerRadius: 12))
+            Text("Mountain Turtle will save the sign-in key and server details privately on this Mac. Only add files from someone you trust.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Connect now", isOn: $connectNow).toggleStyle(.checkbox).disabled(saving)
+            if let failure {
+                Text(failure).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
+                Spacer()
+                if saving { ProgressView().controlSize(.small) }
+                Button("Add connection") { save() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(28).frame(width: 510).tint(moss)
+            .interactiveDismissDisabled(saving)
+            .onAppear { name = connection.name }
+    }
+
+    private var serverLabel: String {
+        let host = connection.host ?? ""
+        let port = connection.port ?? 22
+        return port == 22 ? host : (host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)")
+    }
+
+    private func save() {
+        guard !saving, model.activeAction == nil else { return }
+        let driveName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldConnect = connectNow
+        saving = true; failure = nil
+        model.activeAction = "import-setup"
+        Task {
+            do {
+                let data = try await ServiceClient.run(["import-setup", "--name", driveName], standardInput: document)
+                let response = try JSONDecoder().decode(ActionResponse.self, from: data)
+                guard response.ok, let id = response.id else {
+                    throw TurtleError(message: response.error ?? "The connection could not be added.")
+                }
+                model.selectedID = id
+                await model.refresh()
+                model.activeAction = nil
+                model.driveMessage = shouldConnect ? "Connection added. Connecting your drive…" : "Connection added. Choose Connect drive when you are ready."
+                saving = false
+                dismiss()
+                if shouldConnect {
+                    // Import is already committed. A failed connection leaves a
+                    // configured drive the user can reconnect without importing again.
+                    _ = await model.action(["connect", id])
+                }
+            } catch {
+                model.activeAction = nil
+                saving = false
+                failure = error.localizedDescription
+            }
         }
     }
 }

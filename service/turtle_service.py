@@ -16,6 +16,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -340,6 +341,139 @@ def validate_sftp(connection, paths):
     key_file = local_ssh_file(connection.get("keyFile", ""), paths, "SSH private key") if mode == "keyFile" else ""
     return {"host": host, "user": user, "port": port, "remotePath": remote_path,
             "authMode": mode, "keyFile": key_file, "knownHostsFile": known_hosts}
+
+
+def read_setup_source(path, maximum, label):
+    """Read a chosen regular credential file without following its final symlink."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise ValueError(f"The {label} file could not be opened safely. Choose its original file.") from None
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"Choose a regular {label} file.")
+        if info.st_size > maximum:
+            raise ValueError(f"The {label} file is too large for a setup file.")
+        data = source.read(maximum + 1)
+        if len(data) > maximum:
+            raise ValueError(f"The {label} file is too large for a setup file.")
+        return data
+
+
+@contextlib.contextmanager
+def setup_credentials_directory(paths):
+    """Anchor every managed directory to an open parent, rejecting symlinks."""
+    descriptors = []
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptors.append(os.open(paths.home, flags))
+        for component in ("Library", "Application Support", "Mountain Turtle", "credentials"):
+            parent = descriptors[-1]
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            descriptor = os.open(component, flags, dir_fd=parent)
+            descriptors.append(descriptor)
+            info = os.fstat(descriptor)
+            if info.st_uid != os.getuid():
+                raise ValueError("The local connection folder must belong to your macOS account.")
+            if component == "credentials" and stat.S_IMODE(info.st_mode) & 0o077:
+                raise ValueError("The local key folder must be private to your macOS account.")
+        # Store's lock and JSON must also remain ordinary local files.
+        for name in ("state.lock", "connections.json", f"connections.json.{os.getpid()}.tmp"):
+            try:
+                info = os.stat(name, dir_fd=descriptors[-2], follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError("The local connection store could not be opened safely.")
+        yield descriptors[-1]
+    except OSError:
+        raise ValueError("The local key folder could not be opened safely. It cannot use symbolic links.") from None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def import_setup(data, name, paths):
+    """Validate before installing credentials, then commit one disconnected drive."""
+    import setup_bundle
+    decoded = setup_bundle.decode(data)
+    name = validate_name(name)
+    portable = decoded["connection"]
+    identity = str(uuid.uuid4())
+    store = Store(paths)
+    # Reject an existing name before creating any application folders. Recheck
+    # under the store lock below to cover another simultaneous import.
+    if any(c["name"].casefold() == name.casefold() for c in store.read()["connections"]):
+        raise ValueError("Another saved drive already uses this name")
+    with setup_credentials_directory(paths) as credentials:
+        staging = ".import-" + secrets.token_hex(16)
+        installed = False
+        staged = False
+        reserved = False
+
+        def remove_directory(directory):
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=credentials)
+            try:
+                for filename in ("identity", "known_hosts"):
+                    try:
+                        os.unlink(filename, dir_fd=descriptor)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                os.close(descriptor)
+            os.rmdir(directory, dir_fd=credentials)
+
+        def rollback():
+            if installed or reserved:
+                remove_directory(identity)
+            if staged:
+                remove_directory(staging)
+
+        try:
+            with store.update(rollback=rollback) as state:
+                if any(c["name"].casefold() == name.casefold() for c in state["connections"]):
+                    raise ValueError("Another saved drive already uses this name")
+                # A UUID collision is an error, never permission to overwrite.
+                if any(c["id"] == identity for c in state["connections"]):
+                    raise ValueError("Could not assign a new connection identity. Try importing again.")
+                os.mkdir(staging, mode=0o700, dir_fd=credentials)
+                staged = True
+                directory = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=credentials)
+                try:
+                    for filename, data in (("identity", decoded["privateKey"]),
+                                           ("known_hosts", decoded["knownHosts"])):
+                        descriptor = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                             0o600, dir_fd=directory)
+                        with os.fdopen(descriptor, "wb") as output:
+                            os.fchmod(output.fileno(), 0o600)
+                            output.write(data)
+                            output.flush()
+                            os.fsync(output.fileno())
+                finally:
+                    os.close(directory)
+                # Reserve the final name exclusively before the atomic rename;
+                # only our own empty reservation can be replaced.
+                os.mkdir(identity, mode=0o700, dir_fd=credentials)
+                reserved = True
+                os.rename(staging, identity, src_dir_fd=credentials, dst_dir_fd=credentials)
+                staged = False
+                installed = True
+                key_directory = paths.base / "credentials" / identity
+                fields = validate_sftp(dict(portable,
+                    keyFile=str(key_directory / "identity"),
+                    knownHostsFile=str(key_directory / "known_hosts")), paths)
+                connection = dict(portable, **fields)
+                connection.update(id=identity, name=name, backend="sftp", bucket="", profile="", region="",
+                                  authMode="keyFile", passwordConfigured=False, autoConnect=False,
+                                  desiredConnected=False, updatedAt=time.time(), revision=1)
+                state["connections"].append(connection)
+        except FileExistsError:
+            raise ValueError("The imported key's destination already exists. Try importing again.") from None
+    return {"ok": True, "id": identity}
 
 
 def cache_settings(connection, size=None, age=None):
@@ -1029,6 +1163,9 @@ def parser():
     commands.add_parser("status")
     commands.add_parser("export-connection").add_argument("id")
     commands.add_parser("inspect-connection")
+    commands.add_parser("export-setup").add_argument("id")
+    commands.add_parser("inspect-setup")
+    commands.add_parser("import-setup").add_argument("--name", required=True)
     for command in ("add", "edit"):
         operation = commands.add_parser(command)
         if command == "edit":
@@ -1064,6 +1201,24 @@ def parser():
 
 
 def action(args, paths):
+    if args.command in ("export-setup", "inspect-setup", "import-setup"):
+        import setup_bundle
+        if args.command in ("inspect-setup", "import-setup"):
+            data = sys.stdin.buffer.read(setup_bundle.MAX_FILE_BYTES + 1)
+            if args.command == "inspect-setup":
+                # Only reviewed settings cross back into the UI; credentials
+                # stay in its original in-memory file until the user imports.
+                return {"ok": True, "connection": setup_bundle.decode(data)["connection"]}
+            return import_setup(data, args.name, paths)
+        if sys.stdout.isatty():
+            raise ValueError("Save this setup file through Mountain Turtle so its private key is not displayed in a terminal.")
+        connection = find_connection(Store(paths).read(), args.id)
+        if connection_backend(connection) != "sftp" or connection.get("authMode") != "keyFile":
+            raise ValueError("A setup file needs an SFTP connection with a private key file.")
+        fields = validate_sftp(connection, paths)
+        private_key = read_setup_source(fields["keyFile"], setup_bundle.MAX_PRIVATE_KEY_BYTES, "SSH private key")
+        known_hosts = read_setup_source(fields["knownHostsFile"], setup_bundle.MAX_KNOWN_HOSTS_SOURCE_BYTES, "known hosts")
+        return json.loads(setup_bundle.encode(connection, private_key, known_hosts))
     if args.command in ("export-connection", "inspect-connection"):
         import connection_transfer
         if args.command == "inspect-connection":

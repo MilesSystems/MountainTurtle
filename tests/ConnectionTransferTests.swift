@@ -79,7 +79,7 @@ private enum ConnectionTransferTests {
     private static func fileTypes() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let extensionError = "Choose a Mountain Turtle connection file ending in .mountainturtle."
+        let extensionError = "Choose a Mountain Turtle connection file ending in .turtle or .mountainturtle."
         try failure(extensionError) { _ = try ConnectionTransferIO.read(URL(string: "https://example.test/fixture.mountainturtle")!) }
         let unrelated = root.appendingPathComponent("fixture.json")
         try Data("fixture".utf8).write(to: unrelated)
@@ -92,6 +92,10 @@ private enum ConnectionTransferTests {
         try data.write(to: valid)
         let result = try ConnectionTransferIO.read(valid)
         try require(result == data, "A regular file with the allowed extension was changed")
+        let setup = root.appendingPathComponent("Family.TURTLE")
+        try data.write(to: setup)
+        let setupResult = try ConnectionTransferIO.read(setup)
+        try require(setupResult == data, "The .turtle extension was not accepted")
     }
 
     private static func fileLimits() throws {
