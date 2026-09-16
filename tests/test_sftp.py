@@ -52,6 +52,14 @@ class SFTPTests(unittest.TestCase):
         metadata.write_text(json.dumps({"Dirty": dirty}))
         return root
 
+    def icon_assets(self, backend):
+        suffix = "-sftp" if backend == "sftp" else ""
+        assets = self.paths.resources / ("icon-overlay-assets" + suffix)
+        assets.mkdir(parents=True)
+        for name in turtle.ICON_ASSETS:
+            (assets / name).write_bytes(f"{backend}:{name}".encode())
+        return assets
+
     def test_add_sftp_does_not_require_aws_and_defaults_to_read_only(self):
         with patch.object(turtle, "credential") as keychain:
             result = turtle.action(self.args(), self.paths)
@@ -119,13 +127,56 @@ class SFTPTests(unittest.TestCase):
                 self.assertNotIn("pass =", config)
 
     def test_overlay_quotes_remote_folder_and_escapes_union_option_suffix(self):
-        overlay = self.paths.base / "icon-overlay"
+        overlay = self.paths.base / "icon-overlay-sftp"
         for path in ('/Family Photos', '/Family "photos"', '/folder:ro'):
             with self.subTest(path=path), patch.object(turtle, "materialized_icon_overlay", return_value=overlay):
                 config, remote = turtle.connection_config(dict(self.connection, remotePath=path), self.paths)
             self.assertEqual(remote, "volume:")
             escaped = path.replace('"', '""')
             self.assertIn('"sftp:' + escaped + '/"', config)
+
+    def test_protocol_icons_have_distinct_upstreams_and_do_not_overwrite_each_other(self):
+        self.icon_assets("s3")
+        self.icon_assets("sftp")
+        s3 = dict(self.connection, bucket="photos-bucket", profile="production", region="us-east-1")
+        s3.pop("backend")
+        for connection, backend, folder in ((s3, "s3", "icon-overlay"),
+                                            (self.connection, "sftp", "icon-overlay-sftp"),
+                                            (s3, "s3", "icon-overlay")):
+            with self.subTest(backend=backend):
+                config, remote = turtle.connection_config(connection, self.paths)
+                overlay = self.paths.base / folder
+                self.assertEqual(remote, "volume:")
+                self.assertIn(f'upstreams = "{overlay}:ro"', config)
+                for source, target in turtle.ICON_ASSETS.items():
+                    self.assertEqual((overlay / target).read_bytes(), f"{backend}:{source}".encode())
+        self.assertEqual((self.paths.base / "icon-overlay/.VolumeIcon.icns").read_bytes(), b"s3:VolumeIcon.icns")
+        self.assertEqual((self.paths.base / "icon-overlay-sftp/.VolumeIcon.icns").read_bytes(), b"sftp:VolumeIcon.icns")
+
+    def test_updated_sftp_artwork_refreshes_only_its_own_overlay(self):
+        self.icon_assets("s3")
+        assets = self.icon_assets("sftp")
+        s3_overlay = turtle.materialized_icon_overlay(self.paths)
+        sftp_overlay = turtle.materialized_icon_overlay(self.paths, "sftp")
+        (assets / "VolumeIcon.icns").write_bytes(b"updated-sftp-icon")
+        turtle.connection_config(self.connection, self.paths)
+        self.assertEqual((sftp_overlay / ".VolumeIcon.icns").read_bytes(), b"updated-sftp-icon")
+        self.assertEqual((s3_overlay / ".VolumeIcon.icns").read_bytes(), b"s3:VolumeIcon.icns")
+
+    def test_missing_sftp_artwork_never_falls_back_to_s3(self):
+        self.icon_assets("s3")
+        s3_overlay = turtle.materialized_icon_overlay(self.paths)
+        for missing in ("directory", "icon"):
+            with self.subTest(missing=missing):
+                if missing == "icon":
+                    assets = self.icon_assets("sftp")
+                    (assets / "VolumeIcon.icns").unlink()
+                config, remote = turtle.connection_config(self.connection, self.paths)
+                self.assertEqual(remote, "sftp:")
+                self.assertNotIn("[volume]", config)
+                self.assertNotIn(str(s3_overlay), config)
+                self.assertFalse((self.paths.base / "icon-overlay-sftp").exists())
+                self.assertEqual((s3_overlay / ".VolumeIcon.icns").read_bytes(), b"s3:VolumeIcon.icns")
 
     def test_password_is_saved_by_pipe_without_entering_state_or_arguments(self):
         secret = "test-only password @$ with spaces"

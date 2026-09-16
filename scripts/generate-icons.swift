@@ -113,7 +113,7 @@ func drawAppIcon() {
     color(0xFFFFFF, alpha: 0.55).setStroke(); tile.lineWidth = 3; tile.stroke()
 }
 
-func drawDriveIcon() {
+func drawDriveIcon(label: String) {
     let front = NSBezierPath(roundedRect: NSRect(x: 130, y: 151, width: 764, height: 203), xRadius: 59, yRadius: 59)
     NSGraphicsContext.saveGraphicsState()
     shadow(26, -12, 0.27); cream.setFill(); front.fill()
@@ -139,8 +139,8 @@ func drawDriveIcon() {
     placement.concat()
     drawTurtle()
     NSGraphicsContext.restoreGraphicsState()
-    let text = "S3" as NSString
-    let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 170, weight: .bold), .foregroundColor: cream]
+    let text = label as NSString
+    let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: label.count > 2 ? 145 : 170, weight: .bold), .foregroundColor: cream]
     let measure = text.size(withAttributes: attributes)
     text.draw(at: NSPoint(x: (1024 - measure.width) / 2, y: 359), withAttributes: attributes)
     let slot = NSBezierPath(roundedRect: NSRect(x: 200, y: 214, width: 251, height: 20), xRadius: 10, yRadius: 10)
@@ -214,10 +214,15 @@ guard CommandLine.arguments.count == 2 else {
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true).standardizedFileURL
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 try writeIcon(name: "AppIcon", preview: "appIcon.png", at: output, draw: drawAppIcon)
-try writeIcon(name: "S3Drive", preview: "s3Drive.png", at: output, draw: drawDriveIcon)
-let overlay = output.appendingPathComponent("icon-overlay-assets", isDirectory: true)
-try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
-try Data(contentsOf: output.appendingPathComponent("S3Drive.icns")).write(to: overlay.appendingPathComponent("VolumeIcon.icns"))
-try finderMetadata(flags: 0x0400).write(to: overlay.appendingPathComponent("root-finder-info.ad"))
-try finderMetadata(flags: 0x4000).write(to: overlay.appendingPathComponent("volume-icon-finder-info.ad"))
-print("Created original app and S3 drive icons in \(output.path)")
+for (label, name, preview, directory) in [
+    ("S3", "S3Drive", "s3Drive.png", "icon-overlay-assets"),
+    ("SFTP", "SFTPDrive", "sftpDrive.png", "icon-overlay-assets-sftp"),
+] {
+    try writeIcon(name: name, preview: preview, at: output) { drawDriveIcon(label: label) }
+    let overlay = output.appendingPathComponent(directory, isDirectory: true)
+    try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+    try Data(contentsOf: output.appendingPathComponent("\(name).icns")).write(to: overlay.appendingPathComponent("VolumeIcon.icns"))
+    try finderMetadata(flags: 0x0400).write(to: overlay.appendingPathComponent("root-finder-info.ad"))
+    try finderMetadata(flags: 0x4000).write(to: overlay.appendingPathComponent("volume-icon-finder-info.ad"))
+}
+print("Created original app, S3, and SFTP drive icons in \(output.path)")

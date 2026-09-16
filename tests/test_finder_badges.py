@@ -44,6 +44,12 @@ class BadgeTests(unittest.TestCase):
     def state(self, name="photo.jpg"):
         return badges.badge_for_path(self.paths, [self.connection], self.root + "/" + name)
 
+    def remote_config(self, contents):
+        path = self.paths.base / "remotes" / (self.connection["id"] + ".conf")
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(contents)
+        return path
+
     def complete(self, **extra):
         return dict({"Size": 10, "Dirty": False, "Rs": [{"Pos": 0, "Size": 10}]}, **extra)
 
@@ -162,16 +168,79 @@ class BadgeTests(unittest.TestCase):
     def test_sftp_badges_use_overlay_without_an_s3_bucket(self):
         self.connection.pop("bucket")
         self.connection.update(backend="sftp", remotePath="/test files")
+        overlay = self.paths.base / "icon-overlay-sftp"
+        overlay.mkdir()
+        for name in (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"):
+            (overlay / name).touch()
         self.cache(self.complete())
         self.assertEqual(self.state(), "cached")
 
     def test_sftp_direct_cache_namespace_and_pending_writes(self):
         self.connection.update(backend="sftp", bucket="", remotePath="/test files")
-        (self.paths.base / "icon-overlay/.VolumeIcon.icns").unlink()
+        # An unrelated S3 overlay and stale union cache must not hide direct SFTP writes.
+        self.cache(self.complete())
         self.cache(self.complete(Dirty=True), namespace="sftp/test files")
         self.assertEqual(self.state(), "pending")
         self.connection["remotePath"] = "../other"
         self.assertEqual(self.state(), "unknown")
+
+    def test_incomplete_sftp_overlay_does_not_reuse_old_union_cache(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        overlay = self.paths.base / "icon-overlay-sftp"
+        overlay.mkdir()
+        for name in ("._.", "._.VolumeIcon.icns"):
+            (overlay / name).touch()
+        self.cache(self.complete())
+        self.assertEqual(self.state(), "online")
+        self.cache(self.complete(), namespace="sftp/test files")
+        self.assertEqual(self.state(), "cached")
+
+    def test_recovered_sftp_mount_uses_legacy_union_config_for_cached_and_pending_files(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        self.remote_config('[sftp]\ntype = sftp\n[volume]\ntype = union\n'
+                           'upstreams = "old-icon-overlay:ro" "sftp:/test files/"\n')
+        self.assertFalse((self.paths.base / "icon-overlay-sftp").exists())
+        self.cache(self.complete())
+        self.assertEqual(self.state(), "cached")
+        self.cache(self.complete(Dirty=True))
+        self.assertEqual(self.state(), "pending")
+
+    def test_direct_sftp_config_takes_precedence_over_both_existing_overlays(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        overlay = self.paths.base / "icon-overlay-sftp"
+        overlay.mkdir()
+        for name in (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"):
+            (overlay / name).touch()
+        self.remote_config("[sftp]\ntype = sftp\n")
+        self.cache(self.complete())
+        self.assertEqual(self.state(), "online")
+        self.cache(self.complete(Dirty=True), namespace="sftp/test files")
+        self.assertEqual(self.state(), "pending")
+
+    def test_malformed_or_oversized_remote_config_cannot_report_false_online(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        for contents in ("not an ini file", "", "[sftp]\ntype = s3\n",
+                         "[sftp]\ntype = sftp\n[volume]\ntype = union\n",
+                         "[sftp]\ntype = sftp\n" + "#" * badges.MAX_CONFIG):
+            with self.subTest(contents=contents[:30]):
+                self.remote_config(contents)
+                self.assertEqual(self.state(), "unknown")
+
+    def test_remote_config_read_rejects_symlinks_special_files_and_permission_errors(self):
+        self.connection.update(backend="sftp", bucket="", remotePath="/test files")
+        config = self.remote_config("[sftp]\ntype = sftp\n")
+        outside = self.paths.base / "outside.conf"
+        outside.write_text(config.read_text())
+        config.unlink()
+        config.symlink_to(outside)
+        self.assertEqual(self.state(), "unknown")
+        config.unlink()
+        os.mkfifo(config)
+        self.assertEqual(self.state(), "unknown")
+        config.unlink()
+        self.remote_config("[sftp]\ntype = sftp\n")
+        with patch.object(badges.os, "open", side_effect=PermissionError):
+            self.assertEqual(self.state(), "unknown")
 
     def test_sftp_roots_disable_photo_browser_without_exposing_server(self):
         self.connection.update(backend="sftp", host="private-host", user="private-user")

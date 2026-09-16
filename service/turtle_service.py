@@ -529,11 +529,12 @@ def assert_disconnected(connection, runtime, mounts, paths):
         raise ValueError("Disconnect this drive before editing or removing it")
 
 
-def materialized_icon_overlay(paths):
-    assets = paths.resources / "icon-overlay-assets"
+def materialized_icon_overlay(paths, backend="s3"):
+    suffix = "-sftp" if backend == "sftp" else ""
+    assets = paths.resources / ("icon-overlay-assets" + suffix)
     if not all((assets / name).is_file() for name in ICON_ASSETS):
         return None
-    overlay = paths.base / "icon-overlay"
+    overlay = paths.base / ("icon-overlay" + suffix)
     overlay.mkdir(parents=True, exist_ok=True, mode=0o700)
     for source_name, target_name in ICON_ASSETS.items():
         source = assets / source_name
@@ -564,7 +565,7 @@ def connection_config(connection, paths):
                   f'profile = {connection["profile"]}\nregion = {connection["region"]}\n'
                   "no_check_bucket = true\ndirectory_markers = false\n")
         remote = "s3:" + connection["bucket"]
-    overlay = materialized_icon_overlay(paths)
+    overlay = materialized_icon_overlay(paths, connection_backend(connection))
     if overlay:
         # Rclone's SpaceSepList uses CSV quoting, not shell/backslash escaping.
         quoted = str(overlay).replace('"', '""')

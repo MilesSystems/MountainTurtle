@@ -7,6 +7,7 @@ transfer is active, so partial files are deliberately not labelled "syncing".
 """
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import configparser
 import hmac
 import json
 import os
@@ -18,6 +19,7 @@ import threading
 MAX_BODY = 64 * 1024
 MAX_PATHS = 128
 MAX_METADATA = 1024 * 1024
+MAX_CONFIG = 64 * 1024
 ROOT_FIELDS = ("id", "name", "mountPath", "state", "mounted", "supportsPhotoBrowser")
 
 
@@ -39,8 +41,8 @@ def _component(value):
     return value
 
 
-def _local_file(root, components, metadata=False):
-    """Open only beneath a trusted cache directory, never following symlinks.
+def _local_file(root, components, metadata=False, configuration=False):
+    """Open only beneath a trusted local directory, never following symlinks.
 
     Parent traversal uses directory descriptors, so a rename/symlink swap cannot
     redirect the subsequent open. Nonblocking mode also prevents a special file
@@ -59,21 +61,22 @@ def _local_file(root, components, metadata=False):
         before = os.fstat(file_fd)
         if not stat.S_ISREG(before.st_mode):
             return "unknown", None
-        if not metadata:
+        if not metadata and not configuration:
             return "present", before.st_size
-        if before.st_size > MAX_METADATA:
+        limit = MAX_CONFIG if configuration else MAX_METADATA
+        if before.st_size > limit:
             return "unknown", None
         contents = bytearray()
-        while len(contents) <= MAX_METADATA:
-            chunk = os.read(file_fd, min(65536, MAX_METADATA + 1 - len(contents)))
+        while len(contents) <= limit:
+            chunk = os.read(file_fd, min(65536, limit + 1 - len(contents)))
             if not chunk:
                 break
             contents.extend(chunk)
         after = os.fstat(file_fd)
-        if (len(contents) > MAX_METADATA or before.st_size != after.st_size
+        if (len(contents) > limit or before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns):
             return "unknown", None
-        return "present", json.loads(contents)
+        return "present", contents.decode("utf-8") if configuration else json.loads(contents)
     except FileNotFoundError:
         return "missing", None
     except (OSError, ValueError, UnicodeError):
@@ -81,6 +84,32 @@ def _local_file(root, components, metadata=False):
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _uses_icon_overlay(paths, connection, identity):
+    # Recovered mounts may still use the old shared overlay. The config describes
+    # their real cache namespace even before a protocol-specific overlay exists.
+    kind, contents = _local_file(paths.base, ["remotes", identity + ".conf"], configuration=True)
+    backend = connection.get("backend", "s3")
+    if kind == "present":
+        config = configparser.ConfigParser(interpolation=None)
+        try:
+            config.read_string(contents)
+            if config.get(backend, "type", fallback=None) != backend:
+                return None
+            if config.has_section("volume"):
+                if config.get("volume", "type", fallback=None) != "union" or not config.get("volume", "upstreams", fallback="").strip():
+                    return None
+                return True
+            return False
+        except configparser.Error:
+            return None
+    if kind != "missing":
+        return None
+    suffix = "-sftp" if backend == "sftp" else ""
+    overlay = paths.base / ("icon-overlay" + suffix)
+    return all((overlay / name).is_file() for name in
+               (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"))
 
 
 def _coverage(info):
@@ -132,9 +161,9 @@ def badge_for_path(paths, connections, requested_path):
         return "unknown"
     try:
         identity = _component(connection["id"])
-        overlay = paths.base / "icon-overlay"
-        uses_overlay = all((overlay / name).is_file() for name in
-                           (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns"))
+        uses_overlay = _uses_icon_overlay(paths, connection, identity)
+        if uses_overlay is None:
+            return "unknown"
         if uses_overlay:
             namespace = ["volume"]
         elif connection.get("backend", "s3") == "sftp":

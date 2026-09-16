@@ -10,12 +10,15 @@ Regenerate from the repository root:
 swift scripts/generate-icons.swift "$PWD/Resources"
 ```
 
-`AppIcon.icns` is the app icon. `appIcon.png` and `s3Drive.png` are previews.
-`S3Drive.icns` is the matching Finder network volume icon.
+`AppIcon.icns` is the app icon. `appIcon.png`, `s3Drive.png`, and `sftpDrive.png`
+are previews. `S3Drive.icns` and `SFTPDrive.icns` label Finder volumes with their
+connection protocol.
 
-The read-only `icon-overlay` contains `.VolumeIcon.icns` and two raw AppleDouble
-records. The root record sets Finder's custom-icon flag; the icon-file record
-marks that file invisible. These are local overlay files, never S3 uploads.
+The read-only `icon-overlay` (S3) and `icon-overlay-sftp` (SFTP) each contain
+`.VolumeIcon.icns` and two raw AppleDouble records. Separate directories keep
+simultaneously mounted protocols from sharing artwork. The root record sets
+Finder's custom-icon flag; the icon-file record marks that file invisible.
+These are local overlay files, never uploads to remote storage.
 Copy them as raw bytes. Do not use `ditto` or set a custom icon directly on a
 cloud-backed volume: macOS can merge metadata or write it into remote storage.
 
