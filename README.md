@@ -18,7 +18,8 @@ for storage, requests, and data transfer.
 - [rclone](https://rclone.org/install/) with the `nfsmount` command.
 - **For S3 only:** [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
   and an AWS profile with access to the bucket. S3 storage metrics also need
-  `cloudwatch:GetMetricData` permission.
+  `cloudwatch:GetMetricData` permission. Actual spend needs Cost Explorer access
+  (`ce:GetCostAndUsage`); these extra insights permissions are independent of mounting.
 - **For SFTP:** a server account, a verified server key in a local known-hosts
   file, and an SSH agent key, private key file, or password.
 - Apple's Xcode Command Line Tools to build from source (`xcode-select --install`).
@@ -49,7 +50,7 @@ the required packages.
 
 | Connection type | Authentication | Finder and local metrics | Cloud storage and cost | Photo browser |
 | --- | --- | --- | --- | --- |
-| Amazon S3 | Saved AWS profile, including SSO | Yes | Daily CloudWatch totals and public AWS storage-price estimates | Yes |
+| Amazon S3 | Saved AWS profile, including SSO | Yes | Bucket-wide activity, daily storage, AWS rates, and account S3 spend where authorized | Yes |
 | SFTP | SSH agent, private key file, or Keychain password | Yes | Server filesystem capacity where supported; no inferred price | Browse files in Finder |
 
 Other rclone backends and custom S3-compatible endpoints are not exposed by this
@@ -68,6 +69,10 @@ open "$HOME/Applications/Mountain Turtle.app"
 The build creates `build/Mountain Turtle.app`; the install script places it in
 `~/Applications/Mountain Turtle.app`. Use the installed copy when enabling login
 startup: the background service must keep a stable path to the app's resources.
+Updates preserve the previous app as a verified ZIP archive under
+`~/Library/Application Support/Mountain Turtle/Backups`, keeping backup apps out
+of macOS app registration and permission identity lookup. The installer restores
+the previous app if its final replacement fails. Use the archived app for rollback.
 Python and rclone are external dependencies, not bundled executables. AWS CLI
 is also external and is required only for S3. The build bundles the native
 Keychain and Finder-sidebar helpers.
@@ -169,6 +174,12 @@ previous sign-in tab and choose **Sign in to AWS** to start a fresh request.
 Credentials remain under the AWS tools' management;
 Mountain Turtle saves connection settings rather than AWS access keys.
 
+For SFTP servers on your LAN, allow **Local Network** access when macOS asks.
+If a connection works in Terminal but not in Mountain Turtle, check **System
+Settings → Privacy & Security → Local Network → Mountain Turtle**, then retry.
+The login service identifies Mountain Turtle as its responsible app so macOS can
+associate this permission with the app.
+
 ## Finder file badges
 
 Choose **Enable Finder badges…** in Mountain Turtle and enable its Finder
@@ -226,29 +237,42 @@ force-detach a busy volume or discard its cache. Removing a disconnected saved
 connection removes its local configuration and attempts to remove its saved
 Keychain password; it does not delete remote files.
 
-## Drive insights: graphs, storage, and cost
+## Drive insights: remote activity, storage, and AWS cost
 
 Choose **View metrics** on a drive, or **Drive insights** in Finder's Turtle menu.
-The dashboard shows current-session transferred bytes, current and average
-speed, completed transfers, errors, local cache usage, and queued uploads, with
-throughput, cache, and upload-queue graphs. Read and write traffic are combined.
-Samples refresh every five seconds while the dashboard is open; up to 720 local
-samples from the last 24 hours are retained. Missing readings stay unknown.
+For S3, the dashboard leads with **Bucket activity · all computers**, using AWS
+CloudWatch request metrics. It shows reported upload/download bytes and
+throughput, PUT/GET counts, errors, and latency for 1-, 6-, or 24-hour windows.
+Uploads from another computer are included without this Mac reading the files or
+mounting the drive. AWS observation time, publication lag, and coverage are shown;
+missing minutes remain unknown.
 
-For S3, the dashboard also shows daily CloudWatch storage and object totals,
-30-day histories, and storage-class breakdowns. These load independently of the
-mount. Cloud storage refreshes on opening and when **Refresh storage** is chosen;
-there is no recurring cloud poll or recursive bucket scan. Partial, old, missing,
-and unauthorized data are labeled separately from zero storage.
+Whole-bucket S3 request metrics must already be configured. These are paid AWS
+metrics; the dashboard explains missing configuration without enabling it.
+Collection begins after enablement, without historical backfill. Configured
+activity refreshes every minute while the dashboard is open.
 
-Monthly storage cost is estimated automatically using the bucket region's
-public AWS storage prices for explicitly supported classes. The pricing source
-and assumptions are shown. If any nonzero class cannot be priced, the dashboard
-keeps the total unknown and labels any priced subtotal. An optional blended
-USD/GiB/month rate is saved per drive and overrides automatic pricing locally.
-The 12-month graph applies a chosen storage-change assumption to the selected
-estimate. These are storage estimates and scenarios, not billed spend; requests,
-transfer, retrieval, and other charges are excluded.
+**Bucket storage** separately shows daily CloudWatch totals, 30-day histories,
+and storage-class breakdowns. Ongoing uploads can appear in later daily reports.
+Upload traffic is not treated as net size growth: overwrites, deletions, multipart
+uploads and versions affect the result. Remote storage refreshes once on opening
+or through **Refresh storage**, without recursively scanning the bucket.
+
+**AWS storage pricing** displays real products, SKUs, effective rates, region,
+and source dates from Amazon's public Price List API. The monthly storage estimate
+uses the dated daily size measurement. Unpriced nonzero classes keep the full
+estimate unknown; any known subtotal is labeled. Actual AWS account S3 spend is
+shown separately where Cost Explorer access is available, with explicit account
+scope rather than presenting it as one bucket's bill. Billing can lag 24 hours
+or more; results are cached for six hours. Each uncached Cost Explorer API
+request costs $0.01.
+
+**Explore a scenario** is collapsed initially. Its optional blended-rate override
+and growth assumption are planning inputs, separate from the published rates and
+actual spend. Scenarios exclude requests, transfer, retrieval, and other charges.
+**This Mac: transfer & cache** separately contains this mount's local telemetry;
+those counters do not describe uploads from other computers. Local observations
+refresh every five seconds while open, retaining up to 720 samples in 24 hours.
 
 For SFTP, **Remote server storage** requests total, used, and free filesystem
 capacity from the server's SFTP statistics extension, with a usage breakdown and

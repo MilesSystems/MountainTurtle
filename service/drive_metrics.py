@@ -575,6 +575,32 @@ def parse_storage(response, now):
             "missingStorageTypes": [name for name in observed_types if latest and latest["timestamp"] not in series[name]]}
 
 
+def sftp_failure(stderr):
+    """Classify failures without exposing server output, paths or credentials."""
+    error = (stderr or "").lower()
+    connecting = any(value in error for value in ("dial tcp", "connect:", "network connection"))
+    if ((connecting and any(value in error for value in ("operation not permitted", "permission denied")))
+            or any(value in error for value in ("local network prohibited", "local network access denied", "local network permission", "necp policy denied"))):
+        return MetricsError("macOS denied the network connection. In System Settings → Privacy & Security → Local Network, allow Mountain Turtle, then refresh.", "localNetworkPermissionRequired")
+    if any(value in error for value in ("no route to host", "network is unreachable", "network unreachable", "host is down")):
+        return MetricsError("The SFTP server cannot be reached. Check its address and your network connection. For a local server, also check Mountain Turtle under macOS Privacy & Security → Local Network.", "networkUnavailable")
+    if "connection refused" in error:
+        return MetricsError("The server refused the SFTP connection. Check the SSH port and confirm that the server's SFTP service is running.", "connectionRefused")
+    if any(value in error for value in ("i/o timeout", "connection timed out", "context deadline exceeded", "timeout awaiting", "operation timed out")):
+        return MetricsError("The SFTP connection timed out. Check the server and network connection, then refresh.", "timeout")
+    if "permission denied" in error and any(value in error for value in ("open ", "failed to read", "unable to read")):
+        return MetricsError("macOS could not read an SSH key, known-hosts file or configuration file. Check local file permissions and select accessible SSH files.", "localFilePermissionDenied")
+    if any(value in error for value in ("knownhosts", "host key", "key mismatch")):
+        return MetricsError("The SFTP host key could not be verified. Check this server's trusted known-hosts entry before reconnecting.", "hostKeyMismatch")
+    if any(value in error for value in ("unable to authenticate", "authentication failed", "permission denied (", "no supported methods remain", "ssh agent", "private key")):
+        return MetricsError("SFTP authentication failed. Check this drive's saved credentials or unlock its SSH agent.", "authenticationRequired")
+    if "permission denied" in error or "operation not permitted" in error:
+        return MetricsError("Access to the remote folder or its filesystem statistics was denied. Check the SSH user's permissions for the selected path.", "permissionDenied")
+    if any(value in error for value in ("not supported", "not support", "doesn't support", "shell type", "not implemented", "unsupported")):
+        return MetricsError("This SFTP server does not provide filesystem statistics without shell access. Transfer and cache metrics remain available.", "unsupported")
+    return MetricsError("The SFTP server could not report filesystem capacity. Check connection access and refresh.")
+
+
 class SFTPReader:
     """Read server statvfs data with verified hosts and remote shell access off."""
     def __init__(self, connection, paths):
@@ -604,18 +630,13 @@ class SFTPReader:
                 result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
                                         capture_output=True, text=True, timeout=25)
         except subprocess.TimeoutExpired:
-            raise MetricsError("The SFTP server took too long to report capacity. Refresh later.") from None
+            raise MetricsError("The SFTP server took too long to report capacity. Check the connection and refresh.", "timeout") from None
+        except PermissionError:
+            raise MetricsError("macOS denied access to the local SFTP configuration or executable. Check local file permissions and refresh.", "localFilePermissionDenied") from None
         except OSError:
             raise MetricsError("Could not read SFTP filesystem capacity. Check the connection and refresh.") from None
         if result.returncode:
-            error = (result.stderr or "").lower()
-            if any(value in error for value in ("knownhosts", "host key", "key mismatch")):
-                raise MetricsError("The SFTP host key could not be verified. Check this server's trusted known-hosts entry before reconnecting.", "hostKeyMismatch")
-            if any(value in error for value in ("unable to authenticate", "authentication failed", "ssh agent", "private key")):
-                raise MetricsError("SFTP authentication failed. Check this drive's saved credentials or unlock its SSH agent.", "authenticationRequired")
-            if any(value in error for value in ("not supported", "not support", "doesn't support", "shell type", "not implemented", "unsupported")):
-                raise MetricsError("This SFTP server does not provide filesystem statistics without shell access. Transfer and cache metrics remain available.", "unsupported")
-            raise MetricsError("The SFTP server could not report filesystem capacity. Check connection access and refresh.")
+            raise sftp_failure(result.stderr)
         try:
             if len(result.stdout) > MAX_RESPONSE_BYTES:
                 raise ValueError()

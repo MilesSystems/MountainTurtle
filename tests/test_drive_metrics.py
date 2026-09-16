@@ -306,6 +306,28 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(raised.exception.status, status)
             self.assertNotIn("SECRET", str(raised.exception))
 
+    def test_sftp_network_file_and_server_denials_are_distinguished_without_raw_output(self):
+        cases = [
+            ("dial tcp SECRET: connect: operation not permitted", "localNetworkPermissionRequired", "Local Network"),
+            ("dial tcp SECRET: connect: permission denied", "localNetworkPermissionRequired", "Local Network"),
+            ("Local network access denied SECRET", "localNetworkPermissionRequired", "Local Network"),
+            ("dial tcp SECRET: connect: no route to host", "networkUnavailable", "cannot be reached"),
+            ("dial tcp SECRET: network is unreachable", "networkUnavailable", "cannot be reached"),
+            ("dial tcp SECRET: connect: connection refused", "connectionRefused", "SSH port"),
+            ("dial tcp SECRET: i/o timeout", "timeout", "timed out"),
+            ("request SECRET: context deadline exceeded", "timeout", "timed out"),
+            ("open SECRET/known_hosts: permission denied", "localFilePermissionDenied", "local file permissions"),
+            ("Permission denied (publickey,password) SECRET", "authenticationRequired", "authentication failed"),
+            ("statvfs SECRET: permission denied", "permissionDenied", "remote folder"),
+            ("statvfs SECRET: operation not permitted", "permissionDenied", "remote folder"),
+        ]
+        for raw, status, expected in cases:
+            with self.subTest(raw=raw):
+                error = metrics.sftp_failure(raw)
+                self.assertEqual(error.status, status)
+                self.assertIn(expected, str(error))
+                self.assertNotIn("SECRET", str(error))
+
     def test_cloud_permission_error_is_actionable_without_raw_error_output(self):
         private = "AccessDenied: private-bucket private-token account-id"
         with patch.object(turtle, "executable", return_value="/fake/aws"), patch.object(metrics.subprocess, "run", return_value=Mock(returncode=1, stderr=private)):

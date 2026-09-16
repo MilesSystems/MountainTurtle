@@ -135,7 +135,7 @@ root and updates owned FavoriteVolumes entries through public SharedFileList
 APIs. Its private registry preserves unrelated Finder favorites. That API is
 deprecated; Finder's manual Add to Sidebar is the fallback.
 
-## Photo and metrics services
+## Photo, activity, and metrics services
 
 The independent `photo_browser.py` CLI is **S3-only**; see
 [photo browser protocol](docs/PHOTO_BROWSER.md).
@@ -158,9 +158,45 @@ assumption instead of fetching prices. Missing measurements and incomplete total
 estimates are `null`, not zero. See [metrics schema, limits, and pricing
 assumptions](docs/METRICS.md).
 
+The S3 dashboard also calls an independent request-metrics API:
+
+```text
+python3 service/cloud_activity.py [--resource-dir RESOURCES] snapshot ID --hours 1|6|24
+```
+
+This reads an existing whole-bucket S3 request-metrics configuration and returns
+`scope: "bucketAllClients"`, source/observation timestamps, publication lag,
+selected-window byte/request/error summaries, coverage, and minute-level history.
+Missing configuration returns `notConfigured` or `configurationIncomplete`;
+no command enables paid metrics. Upload traffic is never converted to net bucket
+growth. Configured activity refreshes every minute while the dashboard is open.
+
 The metrics dashboard polls local snapshots about every five seconds only while
-open. Cloud data loads once on opening or manual refresh. Its persisted optional
-rate override and storage-growth scenario recalculate locally without cloud calls.
+open. Daily storage and pricing load on opening or manual refresh. The collapsed
+scenario's persisted optional rate override and growth assumption recalculate
+locally without cloud calls. Published AWS rates remain separate from those
+planning inputs.
+
+## Actual AWS spend
+
+```text
+python3 service/cloud_billing.py [--resource-dir RESOURCES] costs ID
+```
+
+This separate read-only Cost Explorer request returns account-wide S3 spend,
+covering all buckets and regions in the stated account scope. It does not
+attribute the account total to the selected bucket. The response includes
+`source`, `scope`, `accountID`, `currency`, `monthStart`, exclusive `periodEnd`,
+`queriedAt`, `cached`, `total`, `estimated`, `history`, `message`, and `assumptions`.
+Daily history contains `date`, Unix `timestamp`, signed `amount`, and `estimated`;
+negative credits must remain negative. Missing amounts are `null`, not zero.
+
+The period ends before today's incomplete UTC day. AWS reporting can lag by
+24 hours or more, and provisional amounts can be revised. Results are cached
+for six hours; normal refresh respects that cache. Each uncached Cost Explorer
+request costs $0.01. The command does not enable billing features. Permission,
+authentication, no-data, partial, unavailable, and unsupported outcomes remain
+separate from public-price estimates and bucket storage.
 
 ## Paths and setup
 

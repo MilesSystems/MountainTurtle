@@ -99,6 +99,13 @@ counters; resets and gaps do not become invented zero readings. The dashboard
 collects at five-second intervals while open and retains at most 720 observations
 from the last 24 hours with private file permissions.
 
+S3 activity comes from the separate `cloud_activity.py` service. It uses an
+existing whole-bucket request-metrics configuration, observing uploads/downloads,
+requests, errors, and latency across all clients, including other computers.
+It does not enable paid metrics. The UI leads with this remote scope and polls
+configured activity once per minute while open. AWS timestamps and coverage
+remain explicit; absence of datapoints is not zero traffic or retrospective data.
+
 S3 storage uses one bounded CloudWatch request for 30 days of daily size and
 object metrics. Components align by observation day; incomplete totals remain
 unknown. Remote storage queries are independent of whether the drive is mounted and
@@ -111,10 +118,16 @@ scan fallback. SFTP does not provide a price or bill, so no cost is inferred.
 Automatic cost estimates fetch and cache the public regional AWS price list,
 without sending bucket identifiers or credentials. Explicit storage-class and
 pricing-tier mappings determine coverage. Unpriced nonzero components produce a
-partial subtotal, never a complete estimate. A per-drive blended-rate override
-and growth slider recalculate the dashboard locally. The 12-month graph is a
+partial subtotal, never a complete estimate. Matched AWS product rates, SKUs, region, and source dates are displayed directly.
+A collapsed scenario offers a per-drive blended-rate override and growth slider
+that recalculate locally without replacing the main published rate table. The 12-month graph is a
 scenario based on the selected measurement and assumptions, not historical spend
-or an invoice. [Metrics details](METRICS.md) document query limits, cache expiry,
+or an invoice. Remote upload traffic is never assumed to equal net storage
+growth. Actual account-level S3 spend comes from the separate `cloud_billing.py` Cost
+Explorer client, with explicit attribution limits, returned currency, signed
+credits, provisional flags, and completed-UTC-day boundaries. It caches results
+for six hours and does not enable billing features. Billing API charges and
+reporting delay are shown independently from public price estimates. [Metrics details](METRICS.md) document query limits, cache expiry,
 pricing coverage, excluded charges, and sources.
 
 ## Current limits and evidence

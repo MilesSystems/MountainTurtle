@@ -998,6 +998,7 @@ def set_autostart(paths, enabled):
         paths.plist.write_bytes(plistlib.dumps({
             "Label": LABEL, "ProgramArguments": [sys.executable, str(SERVICE), "--resource-dir", str(paths.resources),
                                                    "serve", "--at-login"],
+            "AssociatedBundleIdentifiers": ["io.mountainturtle.app"],
             "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30,
             "ExitTimeOut": 180, "ProcessType": "Background", "Umask": 0o077,
             "StandardOutPath": str(paths.logs / "launcher.log"), "StandardErrorPath": str(paths.logs / "launcher.log"),

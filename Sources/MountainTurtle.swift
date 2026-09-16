@@ -685,7 +685,7 @@ struct MainView: View {
                     Image(systemName: "chart.xyaxis.line").font(.title2).foregroundStyle(moss)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Drive insights").font(.system(size: 13, weight: .semibold))
-                        Text(connection.isSFTP ? "Track transfers, local cache and remote server capacity." : "Track transfers, cloud storage and estimated storage cost.")
+                        Text(connection.isSFTP ? "Track transfers, local cache and remote server capacity." : "See bucket activity, storage, AWS prices and actual spend.")
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()

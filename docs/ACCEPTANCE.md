@@ -118,10 +118,22 @@ That document records completed fixture checks separately from this checklist.
 - [ ] Report exactly which write/cache tests exist and passed. Do not infer live
   durability, upload success, or complete offline availability from mock results.
 
-## Local metrics and remote storage
+## Remote activity, local metrics, and storage
 
 - [ ] Open **View metrics** on both backends. Check keyboard access and readable
   labels at the actual 930×740 dashboard size; inspect graphs after scrolling.
+- [ ] For S3, verify the initial dashboard shows remote bucket activity and
+  identifies all-computer scope. Local mount telemetry and the optional scenario
+  should be separate collapsed sections.
+- [ ] Compare AWS minute-level upload/download observations against an existing
+  whole-bucket request-metrics configuration, including traffic from another
+  computer. Check 1/6/24-hour windows, observation age, coverage, requests/errors,
+  and latency without using local mount counters as a substitute.
+- [ ] If paid request metrics are not configured, show setup guidance and no
+  invented observations. Verify the read-only command does not enable them;
+  retain separate authorization for any configuration change.
+- [ ] Confirm configured activity refreshes once per minute only while open.
+  Missing datapoints and pre-enablement periods must stay unknown.
 - [ ] Compare transferred bytes, errors, cache use, and uploads against the
   mount's authenticated local statistics. Do not label combined traffic as
   download-only or as the provider's billable bandwidth.
@@ -136,13 +148,18 @@ That document records completed fixture checks separately from this checklist.
   empty and distinguish old/partial data from a current complete measurement.
 - [ ] Test denied CloudWatch access and expired AWS sign-in without hiding local
   metrics or claiming empty storage. Remote metrics must work while ejected.
-- [ ] Check automatic public regional pricing against the official price list,
-  including tiers. The source/date and assumptions must be visible. Unsupported
+- [ ] Check the visible AWS rate/product table against the official price list,
+  including tiers, matched SKUs, and region. The source/date and assumptions must be visible. Unsupported
   nonzero classes must retain an unknown total and label any known subtotal.
-- [ ] Enter a manual blended rate and change the growth assumption. Verify cost
+- [ ] Open the collapsed optional scenario, enter a manual blended rate, and change the growth assumption. Verify cost
   recalculates locally, persists the per-drive rate, and reverts to automatic
   pricing when cleared. Check zero and invalid rates. Scenarios must be labeled
   as estimates, with requests/transfer and other excluded charges stated.
+- [ ] Compare actual AWS spend with Cost Explorer for the stated account/service
+  and date range. Label estimated/partial billing data, unavailable access, and
+  account-wide scope; never present all-account S3 costs as a single bucket bill.
+  Preserve negative credits and the returned currency. Verify the six-hour cache
+  and that no incomplete current UTC day is described as a complete billing day.
 - [ ] On SFTP, compare server total/used/free values with its filesystem-statistics
   response. Confirm scope is the remote filesystem, not the selected folder or
   this Mac's cache. Check its sampled history and measurement timestamp.
