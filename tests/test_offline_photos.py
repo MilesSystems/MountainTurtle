@@ -185,13 +185,107 @@ class OfflineTests(unittest.TestCase):
             self.queue.open(item["id"])
         self.assertEqual(path.read_bytes(), b"x" * len(self.reader.data))
 
-    def test_touch_unchanged_original_can_be_reverified_locally(self):
+    def test_status_rechecks_touched_original_once_without_remote_reads(self):
         item = self.download()
         path = Path(item["path"])
         os.utime(path, (1, 1))
-        self.assertEqual(self.queue.status()["items"][0]["state"], "error")
-        self.assertEqual(self.queue.verify(item["id"])["items"][0]["state"], "verified")
+        with patch.object(offline, "hash_file", wraps=offline.hash_file) as digest, \
+                patch.object(self.reader, "head", side_effect=AssertionError("remote read")), \
+                patch.object(self.reader, "get", side_effect=AssertionError("remote read")):
+            self.assertEqual(self.queue.status()["items"][0]["state"], "verified")
+            self.assertEqual(self.queue.status()["items"][0]["state"], "verified")
+            digest.assert_called_once_with(path, cancelled=offline.check_local_cancelled)
+        self.assertEqual(self.queue.read()["items"][0]["localMtimeNs"], path.stat().st_mtime_ns)
         self.assertEqual(len(self.reader.gets), 3)
+
+    @unittest.skipUnless(Path("/usr/bin/xattr").is_file(), "macOS extended attributes")
+    def test_preview_style_extended_attribute_keeps_verified_copy_without_attention(self):
+        item = self.download()
+        path = Path(item["path"])
+        before = path.stat()
+        subprocess.run(["/usr/bin/xattr", "-w", "com.mountainturtle.offline-test", "metadata-only", str(path)],
+                       check=True, capture_output=True)
+        after = path.stat()
+        self.assertEqual((before.st_size, before.st_mtime_ns), (after.st_size, after.st_mtime_ns))
+        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+        with patch.object(offline, "hash_file", wraps=offline.hash_file) as digest, \
+                patch.object(self.reader, "head", side_effect=AssertionError("remote read")), \
+                patch.object(self.reader, "get", side_effect=AssertionError("remote read")):
+            status = self.queue.status()
+            self.assertEqual(status["items"][0]["state"], "verified")
+            self.assertEqual(status["totals"]["errors"], 0)
+            self.assertEqual(status["items"][0]["path"], str(path))
+            self.assertEqual(self.queue.status()["totals"]["errors"], 0)
+            digest.assert_called_once_with(path, cancelled=offline.check_local_cancelled)
+        self.assertEqual(offline.offline_original(self.connection, self.paths, **self.identity), path)
+
+    def test_status_recheck_preserves_unverified_classification(self):
+        self.reader.checksum = None
+        item = self.download()
+        os.utime(item["path"], (1, 1))
+        status = self.queue.status()
+        self.assertEqual(status["items"][0]["state"], "downloaded")
+        self.assertEqual(status["totals"]["verified"], 0)
+        self.assertEqual(status["totals"]["errors"], 0)
+
+    def test_status_recheck_is_allowed_while_download_queue_is_paused(self):
+        item = self.download()
+        self.queue.pause()
+        os.utime(item["path"], (1, 1))
+        status = self.queue.status()
+        self.assertTrue(status["paused"])
+        self.assertEqual(status["items"][0]["state"], "verified")
+
+    def test_cancelled_status_recheck_preserves_completion_for_next_poll(self):
+        item = self.download()
+        os.utime(item["path"], (1, 1))
+        offline.cancel()
+        with self.assertRaises(offline.Paused):
+            self.queue.status()
+        self.assertEqual(self.queue.read()["items"][0]["state"], "verified")
+        offline._stop_requested = False
+        self.assertEqual(self.queue.status()["items"][0]["state"], "verified")
+
+    def test_status_detects_and_persists_content_change_without_repeated_hashing(self):
+        item = self.download()
+        path = Path(item["path"])
+        path.write_bytes(b"x" * len(self.reader.data))
+        with patch.object(offline, "hash_file", wraps=offline.hash_file) as digest:
+            self.assertEqual(self.queue.status()["items"][0]["state"], "error")
+            self.assertEqual(self.queue.status()["items"][0]["state"], "error")
+            digest.assert_called_once_with(path, cancelled=offline.check_local_cancelled)
+        self.assertEqual(path.read_bytes(), b"x" * len(self.reader.data))
+
+    def test_concurrent_status_polls_share_one_recheck(self):
+        item = self.download()
+        path = Path(item["path"])
+        os.utime(path, (1, 1))
+        started, release = threading.Event(), threading.Event()
+        original_hash = offline.hash_file
+        results, failures = [], []
+        def delayed_hash(*args, **kwargs):
+            started.set()
+            if not release.wait(2):
+                raise AssertionError("test hash was not released")
+            return original_hash(*args, **kwargs)
+        def poll():
+            try:
+                results.append(self.queue.status())
+            except Exception as error:
+                failures.append(error)
+        with patch.object(offline, "hash_file", side_effect=delayed_hash) as digest:
+            first = threading.Thread(target=poll)
+            second = threading.Thread(target=poll)
+            first.start()
+            self.assertTrue(started.wait(2))
+            second.start()
+            release.set()
+            first.join(2)
+            second.join(2)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual([result["items"][0]["state"] for result in results], ["verified", "verified"])
+            digest.assert_called_once_with(path, cancelled=offline.check_local_cancelled)
 
     def test_changed_s3_identity_fails_before_download(self):
         self.identity["etag"] = '"old-version"'

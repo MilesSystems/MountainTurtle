@@ -44,6 +44,13 @@ def cancel(*_):
     _stop_requested = True
 
 
+def check_local_cancelled():
+    # Checking a retained photo is allowed while downloads are paused. Only a
+    # cancelled CLI should interrupt this local read; it must not mark corruption.
+    if _stop_requested:
+        raise Paused("The local photo check was cancelled. Saved files were preserved.")
+
+
 def regular_file(path, flags=os.O_RDONLY, mode=0o600, links=1):
     try:
         descriptor = os.open(path, flags | os.O_NOFOLLOW, mode)
@@ -323,26 +330,63 @@ class OfflineQueue:
         if _stop_requested or value["paused"] or value.get("updatePaused") or turtle.Store(self.paths).read().get("updateHandoff"):
             raise Paused("Downloads are paused. Resume when ready.")
 
+    def original_snapshot_matches(self, item):
+        try:
+            info = self.target(item).lstat()
+            return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                    and info.st_size == item["size"] and info.st_mtime_ns == item.get("localMtimeNs")
+                    and info.st_ctime_ns == item.get("localCtimeNs") and info.st_ino == item.get("localInode"))
+        except OSError:
+            return False
+
+    def check_saved_file(self, item):
+        """Recheck bytes locally while the caller holds this item's lock."""
+        try:
+            hashes = hash_file(self.target(item), cancelled=check_local_cancelled)
+            if not item.get("sha256") or hashes["size"] != item["size"] or hashes["sha256"] != item["sha256"]:
+                raise OfflineError("The local photo changed. It was preserved; no download replaced it.")
+            info = hashes["stat"]
+            return self.change(item["id"], state="verified" if (item.get("verification") or "").startswith("S3 full-object") else "downloaded",
+                               error=None, verifiedAt=time.time(), localMtimeNs=info.st_mtime_ns,
+                               localCtimeNs=info.st_ctime_ns, localInode=info.st_ino)
+        except Paused:
+            raise
+        except (OfflineError, OSError) as error:
+            return self.change(item["id"], state="error", error=str(error) if isinstance(error, OfflineError)
+                               else "The saved photo could not be read.")
+
+    def refresh_completed(self, item):
+        if self.original_snapshot_matches(item):
+            return item
+        # Preview and Finder can add extended attributes without changing image
+        # bytes. Only a checksum recheck can safely accept the new ctime. Hold an
+        # item lock, not the whole queue, and re-read after waiting so concurrent
+        # polls share one persisted check rather than each hashing a large photo.
+        with self.lock(item["id"] + ".lock"):
+            with self.lock():
+                current = dict(self.find(self.read(), item["id"]))
+            if current["state"] not in COMPLETE or self.original_snapshot_matches(current):
+                return current
+            return self.check_saved_file(current)
+
     def status(self):
         with self.lock():
             value = self.read()
         running = self.worker_running()
         items = []
         for original in value["items"]:
+            if original["state"] in COMPLETE:
+                original = self.refresh_completed(original)
             item = {key: original.get(key) for key in
                     ("id", "key", "etag", "size", "state", "bytesDownloaded", "error", "sha256", "verification", "verifiedAt")}
             item["name"] = PurePosixPath(item["key"]).name
             item["path"] = None
             if item["state"] in COMPLETE:
-                target = self.target(original)
-                try:
-                    info = target.lstat()
-                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-                            or info.st_size != item["size"] or info.st_mtime_ns != original.get("localMtimeNs")
-                            or info.st_ctime_ns != original.get("localCtimeNs") or info.st_ino != original.get("localInode")):
-                        raise OSError()
-                    item["path"] = str(target)
-                except OSError:
+                if self.original_snapshot_matches(original):
+                    item["path"] = str(self.target(original))
+                else:
+                    # A write after the hash must still invalidate this response;
+                    # never bind an earlier digest to a later metadata snapshot.
                     item.update(state="error", error="The local photo is missing or changed. Verify it before opening; existing files are preserved.")
             elif item["state"] == "downloading" and not running:
                 item["state"] = "paused" if value["paused"] or value.get("updatePaused") else "queued"
@@ -610,17 +654,7 @@ class OfflineQueue:
                 raise OfflineError("This photo is still downloading. Verify it when its download finishes.")
             with self.lock():
                 item = dict(self.find(self.read(), identity))
-            target = self.target(item)
-            try:
-                hashes = hash_file(target)
-                if not item.get("sha256") or hashes["size"] != item["size"] or hashes["sha256"] != item["sha256"]:
-                    raise OfflineError("The local photo changed. It was preserved; no download replaced it.")
-                info = hashes["stat"]
-                self.change(identity, state="verified" if item.get("verification", "").startswith("S3 full-object") else "downloaded",
-                            error=None, verifiedAt=time.time(), localMtimeNs=info.st_mtime_ns,
-                            localCtimeNs=info.st_ctime_ns, localInode=info.st_ino)
-            except (OfflineError, OSError) as error:
-                self.change(identity, state="error", error=str(error) if isinstance(error, OfflineError) else "The saved photo could not be read.")
+            self.check_saved_file(item)
         return self.status()
 
     def open(self, identity):
