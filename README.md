@@ -180,6 +180,16 @@ Settings → Privacy & Security → Local Network → Mountain Turtle**, then re
 The login service identifies Mountain Turtle as its responsible app so macOS can
 associate this permission with the app.
 
+## Photo dates
+
+Mountain Turtle's **Browse photos** view shows **Date taken** from the camera's
+embedded metadata. Use **Sort this page** to order the current page by name or
+capture date; missing dates appear as **Unknown**. Dates use the camera's
+recorded local time. Reading dates can fetch small JPEG headers, but never a
+full large original or an entire folder in the background. Other formats can
+show their date once the original is available locally. See the
+[photo browser guide](docs/PHOTO_BROWSER.md#date-taken-and-sorting) for details.
+
 ## Finder file badges
 
 Choose **Enable Finder badges…** in Mountain Turtle and enable its Finder

@@ -2,7 +2,8 @@
 
 The native app can call `service/photo_browser.py` to browse S3 photos without
 asking Finder to enumerate a huge flat directory. The script uses Python 3.9+
-standard-library code, the installed AWS CLI v2, and macOS `sips`. It emits one
+standard-library code, the installed AWS CLI v2, macOS `sips`, and the bundled
+ImageIO photo-date helper. It emits one
 JSON response and never writes to S3. It reads the same saved connection records
 as the mount service, so a request can access only its selected bucket/profile.
 
@@ -22,6 +23,7 @@ photo_browser.py list ID --prefix PREFIX [--cursor TOKEN] [--limit 100]
 photo_browser.py thumbnail ID --key KEY --etag ETAG --size BYTES [--pixels 256]
 photo_browser.py thumbnail ID ... --cache-only
 photo_browser.py thumbnail ID ... --allow-original
+photo_browser.py date-taken ID --key KEY --etag ETAG --size BYTES [--cache-only]
 photo_browser.py open-original ID --key KEY --etag ETAG --size BYTES
 ```
 
@@ -54,7 +56,8 @@ Successful thumbnail:
   "thumbnailPath": "/absolute/local/cache/path.jpg",
   "source": "embedded-jpeg",
   "downloadedBytes": 131072,
-  "needsOriginal": false
+  "needsOriginal": false,
+  "dateTaken": "2026-09-11T13:34:50"
 }
 ```
 
@@ -62,9 +65,44 @@ Successful thumbnail:
 `downloaded-original`, or `unavailable`. An unavailable preview returns
 `thumbnailPath: null`, `needsOriginal: true`, and an explanation; it is a usable
 placeholder result rather than a reason to download the full original silently.
-Original retrieval returns `originalPath`, `source`, and `downloadedBytes`.
+Original retrieval returns `originalPath`, `source`, `downloadedBytes`, and
+nullable `dateTaken`.
 Errors use `{"ok":false,"error":"explanation"}` and a nonzero exit status.
 Cancellation exits with status 130.
+
+## Date taken and sorting
+
+Photo tiles show **Date taken** from EXIF `DateTimeOriginal`, or **Unknown** when
+that value is unavailable. The native helper reads ImageIO properties without
+decoding image pixels. If a bounded JPEG header ends before its image frame,
+it also checks complete EXIF APP1 segments within those first 128 KiB for
+`DateTimeOriginal`, validating TIFF byte order, directory counts, and offsets.
+This handles large editing metadata that prevents ImageIO from exposing the
+already available EXIF date. It validates the recorded calendar date and keeps the
+camera's local wall-clock time; it does not guess a timezone or replace missing
+capture dates with file creation, modification, or S3 upload dates.
+
+Thumbnail requests extract dates from the same original or bounded JPEG header
+they already read. Date results are cached separately from thumbnail size and
+scoped to the connection, bucket, profile, region, key, ETag, and size. Opening an
+original can resolve a date that was unavailable in a header or unsupported
+online format. A cached thumbnail alone is not a source for the original's date.
+
+The explicit `date-taken` operation returns `ok`, nullable `dateTaken`, and
+`downloadedBytes`. It reuses a verified complete local original when available;
+otherwise it can request only the first 128 KiB of a JPEG, conditional on the
+listed ETag. It never fetches a full large original for a date. Other formats
+remain Unknown until a complete original is locally available. `--cache-only`
+forbids remote reads. Missing metadata is cached, but a newly available complete
+original can replace that result.
+
+**Sort this page** offers name, newest date taken, and oldest date taken. Date
+sorting reads dates for the current page with at most two photo requests in
+flight, then orders known dates by recorded camera time with Unknown dates last.
+Name provides a deterministic tie-break. This does not sort the entire bucket or
+scan additional pages. Choosing date sorting can read up to 128 KiB per uncached
+JPEG on the page even when small previews are disabled. Navigation and dismissal
+cancel outstanding page requests.
 
 ## Thumbnail retrieval and honest download behavior
 

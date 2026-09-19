@@ -70,6 +70,11 @@ CREDENTIALS_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Credentials"
     -framework Foundation -framework Security \
     "$PROJECT_DIR/Sources/Credentials/main.swift" -o "$CREDENTIALS_PATH"
 
+PHOTO_DATES_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Photo Dates"
+/usr/bin/xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx14.0" \
+    -framework Foundation -framework ImageIO \
+    "$PROJECT_DIR/Sources/PhotoDates/main.swift" -o "$PHOTO_DATES_PATH"
+
 "$PYTHON_BIN" - "$PROJECT_DIR" "$APP_PATH" <<'PY'
 from pathlib import Path
 import os
@@ -155,6 +160,7 @@ PY
     --entitlements "$PROJECT_DIR/Sources/FinderSync/Entitlements.plist" "$EXTENSION_PATH"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$HELPER_PATH"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$CREDENTIALS_PATH"
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$PHOTO_DATES_PATH"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp=none "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"

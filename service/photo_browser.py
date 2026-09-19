@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -25,6 +26,7 @@ HEADER_BYTES = 128 * 1024
 MAX_THUMB_ORIGINAL = 32 * 1024 * 1024
 CACHE_BYTES = 256 * 1024 * 1024
 CACHE_FILES = 2048
+DATE_HELPER_TIMEOUT = 10
 
 
 class BrowserError(Exception):
@@ -184,13 +186,35 @@ def render_thumbnail(source, destination, pixels):
         raise BrowserError("This image format could not be previewed.")
 
 
+def checked_date_taken(value):
+    """Camera wall-clock time only: never invent a timezone or a file date."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", value):
+        raise ValueError("Invalid camera date.")
+    datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    return value
+
+
+def extract_date_taken(source, paths):
+    """The helper reads ImageIO properties or bounded JPEG EXIF, never image pixels."""
+    helper = paths.resources.parent / "Helpers/Mountain Turtle Photo Dates"
+    if not helper.is_file():
+        raise BrowserError("The photo date helper is unavailable.")
+    result = run_process([str(helper), str(source)], timeout=DATE_HELPER_TIMEOUT)
+    if len(result) > 4096:
+        raise ValueError("Invalid photo metadata response.")
+    return checked_date_taken(json.loads(result)["dateTaken"])
+
+
 class PhotoBrowser:
-    def __init__(self, connection, paths, reader=None, renderer=render_thumbnail):
+    def __init__(self, connection, paths, reader=None, renderer=render_thumbnail, extractor=None):
         if connection.get("backend", "s3") != "s3":
             raise BrowserError("The photo browser is available for S3 drives. Open this SFTP drive in Finder to browse its files.")
         self.connection, self.paths = connection, paths
         self.reader = reader or AWSReader(connection, paths)
         self.renderer = renderer
+        self.extractor = extractor or (lambda source: extract_date_taken(source, paths))
         self.base = paths.cache / "photo-browser"
         self.artifacts = self.base / "artifacts"
         for folder in (self.base, self.artifacts):
@@ -343,29 +367,100 @@ class PhotoBrowser:
         if not isinstance(etag, str) or not etag.strip('" ') or len(etag) > 256 or any(ord(c) < 32 for c in etag):
             raise BrowserError("The photo version is invalid. Refresh the folder.")
 
+    def date_record(self, digest):
+        target = self.safe_path(self.artifacts / (digest + ".date-taken"))
+        try:
+            record = limited_json(target, 4096)
+            if record["version"] != 1 or not isinstance(record["complete"], bool):
+                return None
+            checked_date_taken(record["dateTaken"])
+            return record
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def capture_date(self, digest, source, complete):
+        # Called while holding the object lock, shared with all thumbnail sizes.
+        record = self.date_record(digest)
+        if record and (record["dateTaken"] is not None or record["complete"] or not complete):
+            return record["dateTaken"]
+        value = None
+        if source is not None:
+            try:
+                value = checked_date_taken(self.extractor(source))
+            except Cancelled:
+                raise
+            except (OSError, ValueError, TypeError, KeyError, BrowserError, subprocess.SubprocessError):
+                # Optional metadata failures must not expose subprocess output or
+                # prevent viewing a photo. Do not cache a transient helper failure
+                # as a permanently missing date. Cancellation still propagates.
+                return record["dateTaken"] if record else None
+        self.save_artifact(self.artifacts / (digest + ".date-taken"),
+                           {"version": 1, "dateTaken": value, "complete": complete})
+        return value
+
+    def fetch_header(self, key, etag, size, destination):
+        expected = min(size, HEADER_BYTES)
+        self.reader.get(key, etag, destination, "bytes=0-%s" % (expected - 1))
+        if destination.stat().st_size != expected:
+            raise BrowserError("The photo header download was incomplete or exceeded its limit. Try again.")
+        return expected
+
+    def date_taken(self, key, etag, size, cache_only=False):
+        self.validate_photo(key, etag, size)
+        digest = self.identity(key, etag, size)
+        with self.key_lock(digest):
+            record = self.date_record(digest)
+            if record and (record["dateTaken"] is not None or record["complete"]):
+                return {"ok": True, "dateTaken": record["dateTaken"], "downloadedBytes": 0}
+            source = self.cached_original(key, etag, size)
+            if source is None and (record is not None or cache_only):
+                return {"ok": True, "dateTaken": None, "downloadedBytes": 0}
+            downloaded = 0
+            with self.slot(), tempfile.TemporaryDirectory(prefix="work-", dir=self.base) as work:
+                complete = source is not None
+                if source is None and PurePosixPath(key).suffix.lower() in (".jpg", ".jpeg"):
+                    source = Path(work) / "header.jpg"
+                    downloaded = self.fetch_header(key, etag, size, source)
+                    complete = downloaded == size
+                value = self.capture_date(digest, source, complete)
+                self.trim()
+                return {"ok": True, "dateTaken": value, "downloadedBytes": downloaded}
+
     def thumbnail(self, key, etag, size, pixels=256, allow_original=False, cache_only=False):
         self.validate_photo(key, etag, size)
         if not 64 <= pixels <= 1024:
             raise BrowserError("Thumbnail size must be between 64 and 1024 pixels.")
-        digest = self.identity(key, etag, size, pixels)
-        target = self.artifacts / (digest + ".jpg")
-        unavailable = self.artifacts / (digest + ".unavailable")
+        digest = self.identity(key, etag, size)
+        thumbnail_digest = self.identity(key, etag, size, pixels)
+        target = self.artifacts / (thumbnail_digest + ".jpg")
+        unavailable = self.artifacts / (thumbnail_digest + ".unavailable")
         with self.key_lock(digest):
             self.safe_path(target)
             self.safe_path(unavailable)
-            if target.is_file():
-                os.utime(target, None)
-                return {"ok": True, "thumbnailPath": str(target), "source": "thumbnail-cache", "downloadedBytes": 0, "needsOriginal": False}
+            record = self.date_record(digest)
+            date_taken = record["dateTaken"] if record else None
             source = self.cached_original(key, etag, size)
+            if target.is_file():
+                refresh_date = source is not None and (record is None or (date_taken is None and not record["complete"]))
+                if refresh_date:
+                    with self.slot():
+                        date_taken = self.capture_date(digest, source, complete=True)
+                os.utime(target, None)
+                if refresh_date:
+                    self.trim()
+                return {"ok": True, "thumbnailPath": str(target), "source": "thumbnail-cache", "downloadedBytes": 0,
+                        "needsOriginal": False, "dateTaken": date_taken}
             downloaded = 0
             origin = "original-cache"
             with self.slot(), tempfile.TemporaryDirectory(prefix="work-", dir=self.base) as work:
                 work = Path(work)
+                if source is not None:
+                    date_taken = self.capture_date(digest, source, complete=True)
                 if source is None and not cache_only:
                     if PurePosixPath(key).suffix.lower() in (".jpg", ".jpeg") and not unavailable.exists():
                         header = work / "header.jpg"
-                        self.reader.get(key, etag, header, "bytes=0-%s" % (min(size, HEADER_BYTES) - 1))
-                        downloaded += header.stat().st_size
+                        downloaded += self.fetch_header(key, etag, size, header)
+                        date_taken = self.capture_date(digest, header, complete=header.stat().st_size == size)
                         embedded = jpeg_thumbnail(header.read_bytes())
                         if embedded:
                             source = work / "embedded.jpg"
@@ -380,20 +475,23 @@ class PhotoBrowser:
                         downloaded += source.stat().st_size
                         if source.stat().st_size != size:
                             raise BrowserError("The original download was incomplete. Try again.")
+                        date_taken = self.capture_date(digest, source, complete=True)
                         origin = "downloaded-original"
                 if source is None:
                     if not cache_only:
                         self.save_artifact(unavailable, {"needsOriginal": True})
                         self.trim()
                     return {"ok": True, "thumbnailPath": None, "source": "unavailable", "downloadedBytes": downloaded,
-                            "needsOriginal": True, "message": "No cached or embedded preview. Open or download the original to preview it."}
+                            "needsOriginal": True, "dateTaken": date_taken,
+                            "message": "No cached or embedded preview. Open or download the original to preview it."}
                 rendered = work / "thumbnail.jpg"
                 self.renderer(source, rendered, pixels)
                 self.safe_path(target)
                 rendered.replace(target)
                 unavailable.unlink(missing_ok=True)
                 self.trim()
-                return {"ok": True, "thumbnailPath": str(target), "source": origin, "downloadedBytes": downloaded, "needsOriginal": False}
+                return {"ok": True, "thumbnailPath": str(target), "source": origin, "downloadedBytes": downloaded,
+                        "needsOriginal": False, "dateTaken": date_taken}
 
     def open_original(self, key, etag, size):
         self.validate_photo(key, etag, size)
@@ -412,7 +510,11 @@ class PhotoBrowser:
             self.safe_path(marker)
             source = self.cached_original(key, etag, size)
             if source and source.resolve().is_relative_to(directory.resolve()):
-                return {"ok": True, "originalPath": str(source), "source": "download-cache", "downloadedBytes": 0}
+                with self.slot():
+                    date_taken = self.capture_date(digest, source, complete=True)
+                    self.trim()
+                return {"ok": True, "originalPath": str(source), "source": "download-cache", "downloadedBytes": 0,
+                        "dateTaken": date_taken}
             if target.exists():
                 # Never replace a user's locally edited or untracked download.
                 target = directory / (digest[:16] + "-" + str(time.time_ns()) + "-" + name)
@@ -429,9 +531,10 @@ class PhotoBrowser:
                 self.safe_path(target)
                 temporary.replace(target)
                 self.save_artifact(marker, {"path": str(target), "mtimeNs": target.stat().st_mtime_ns})
+                date_taken = self.capture_date(digest, target, complete=True)
                 self.trim()
                 return {"ok": True, "originalPath": str(target), "source": "original-cache" if source else "downloaded-original",
-                        "downloadedBytes": 0 if source else size}
+                        "downloadedBytes": 0 if source else size, "dateTaken": date_taken}
 
 
 def parser():
@@ -443,7 +546,7 @@ def parser():
     listing.add_argument("--prefix", default="")
     listing.add_argument("--cursor")
     listing.add_argument("--limit", type=int, default=100)
-    for operation in ("thumbnail", "open-original"):
+    for operation in ("thumbnail", "open-original", "date-taken"):
         command = commands.add_parser(operation)
         command.add_argument("id")
         command.add_argument("--key", required=True)
@@ -452,6 +555,7 @@ def parser():
         if operation == "thumbnail":
             command.add_argument("--pixels", type=int, default=256)
             command.add_argument("--allow-original", action="store_true")
+        if operation in ("thumbnail", "date-taken"):
             command.add_argument("--cache-only", action="store_true")
     return result
 
@@ -469,6 +573,8 @@ def main():
             response = browser.list(args.prefix, args.cursor, args.limit)
         elif args.command == "thumbnail":
             response = browser.thumbnail(args.key, args.etag, args.size, args.pixels, args.allow_original, args.cache_only)
+        elif args.command == "date-taken":
+            response = browser.date_taken(args.key, args.etag, args.size, args.cache_only)
         else:
             response = browser.open_original(args.key, args.etag, args.size)
         print(json.dumps(response, ensure_ascii=False))

@@ -65,14 +65,6 @@ struct PhotoFolder: Decodable, Identifiable {
     var name: String
     var id: String { key }
 }
-struct PhotoItem: Decodable, Identifiable {
-    var key: String
-    var name: String
-    var size: Int64
-    var etag: String
-    var id: String { key }
-    var arguments: [String] { ["--key=\(key)", "--etag=\(etag)", "--size=\(size)"] }
-}
 struct PhotoPage: Decodable {
     var prefix: String
     var folders: [PhotoFolder]
@@ -86,8 +78,32 @@ struct PhotoPreview: Decodable {
     var downloadedBytes: Int?
     var needsOriginal: Bool?
     var message: String?
+    var dateTaken: String?
 }
-struct OriginalPhoto: Decodable { var originalPath: String }
+struct OriginalPhoto: Decodable {
+    var originalPath: String
+    var dateTaken: String?
+}
+
+private struct PhotoDateResponse: Decodable { var dateTaken: String? }
+private struct PhotoDateResult: Sendable {
+    let identity: PhotoIdentity
+    let date: PhotoTakenDate?
+}
+
+private enum PhotoDates {
+    static func read(_ photo: PhotoItem, connectionID: String) async -> PhotoDateResult {
+        do {
+            try await ThumbnailSlots.shared.acquire()
+            defer { Task { await ThumbnailSlots.shared.release() } }
+            let result = try await PhotoClient.run(["date-taken", connectionID] + photo.arguments, as: PhotoDateResponse.self)
+            try Task.checkCancellation()
+            return PhotoDateResult(identity: photo.identity, date: PhotoTakenDate(result.dateTaken))
+        } catch {
+            return PhotoDateResult(identity: photo.identity, date: nil)
+        }
+    }
+}
 
 private struct PhotoFrames: PreferenceKey {
     static var defaultValue: [String: CGRect] = [:]
@@ -111,10 +127,18 @@ struct PhotoBrowserView: View {
     @State private var failure: String?
     @State private var originalMessage: String?
     @State private var originalTask: Task<Void, Never>?
+    @State private var originalRequestID = UUID()
     @State private var opening: String?
     @State private var visible: Set<String> = []
     @State private var previews = true
     @State private var originalRefreshes: [String: UUID] = [:]
+    @State private var sort: PhotoPageSort = .name
+    @State private var orderedPhotos: [PhotoItem] = []
+    @State private var dates: [PhotoIdentity: PhotoTakenDate] = [:]
+    @State private var dateTask: Task<Void, Never>?
+    @State private var dateRequestID = UUID()
+    @State private var readingDates = false
+    @State private var dateFailures = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -137,6 +161,22 @@ struct PhotoBrowserView: View {
             }.padding(.horizontal, 20).padding(.bottom, 14)
             Text("Only visible tiles request previews. Missing previews stay online until you choose to create one or open the original.")
                 .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 12)
+            HStack(spacing: 10) {
+                Picker("Sort this page", selection: $sort) {
+                    ForEach(PhotoPageSort.allCases) { choice in Text(choice.rawValue).tag(choice) }
+                }.frame(width: 295)
+                    .help("Sort only the photos on this page. Camera dates keep their recorded time; missing dates appear last.")
+                if readingDates {
+                    ProgressView().controlSize(.small)
+                    Text("Reading dates on this page…")
+                } else if dateFailures > 0 {
+                    Text("\(dateFailures) dates could not be read.")
+                    Button("Retry dates") { sortPage() }
+                } else {
+                    Text("Camera dates; missing dates are Unknown.")
+                }
+                Spacer(minLength: 0)
+            }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 12)
             Divider()
             if let failure {
                 VStack(alignment: .leading, spacing: 10) {
@@ -155,11 +195,13 @@ struct PhotoBrowserView: View {
             footer.padding(16)
         }.frame(width: 860, height: 660).tint(moss)
             .task(id: requestID) { await loadPage() }
-            .onDisappear { originalTask?.cancel() }
+            .onChange(of: sort) { _, _ in sortPage() }
+            .onDisappear { cancelPageRequests() }
     }
 
     private func gallery(_ page: PhotoPage) -> some View {
-        GeometryReader { viewport in
+        let generation = requestID
+        return GeometryReader { viewport in
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 16)], spacing: 18) {
                     ForEach(page.folders) { folder in
@@ -170,13 +212,16 @@ struct PhotoBrowserView: View {
                             }.frame(maxWidth: .infinity).contentShape(Rectangle())
                         }.buttonStyle(.plain).help("Open \(folder.name)")
                     }
-                    ForEach(page.photos) { photo in
+                    ForEach(orderedPhotos) { photo in
                         PhotoTile(connectionID: connection.id, photo: photo, visible: previews && visible.contains(photo.key),
                                   originalRefresh: originalRefreshes[photo.key], opening: opening == photo.key,
+                                  dateTaken: dates[photo.identity] ?? PhotoTakenDate(nil),
+                                  receivedDate: { value in recordDate(value, for: photo, generation: generation) },
                                   openOriginal: { open(photo, reveal: false) }, downloadOriginal: { open(photo, reveal: true) })
                             .background(GeometryReader { geometry in
                                 Color.clear.preference(key: PhotoFrames.self, value: [photo.key: geometry.frame(in: .named("photoViewport"))])
                             })
+                            .id(photo.identity)
                     }
                 }.padding(20)
                 if page.photos.isEmpty && page.folders.isEmpty {
@@ -201,7 +246,10 @@ struct PhotoBrowserView: View {
             Spacer()
             if opening != nil {
                 ProgressView().controlSize(.small)
-                Button("Cancel download") { originalTask?.cancel(); opening = nil; originalMessage = "Download cancelled." }
+                Button("Cancel download") {
+                    originalTask?.cancel(); originalRequestID = UUID()
+                    opening = nil; originalMessage = "Download cancelled."
+                }
             }
             Button("Previous") {
                 cursor = history.removeLast(); requestID = UUID()
@@ -220,34 +268,123 @@ struct PhotoBrowserView: View {
     private func navigate(to next: String) {
         prefix = next; cursor = nil; history = []; visible = []; requestID = UUID()
     }
+    private func cancelPageRequests() {
+        dateTask?.cancel(); dateRequestID = UUID(); readingDates = false
+        originalTask?.cancel(); originalRequestID = UUID(); opening = nil
+    }
     private func loadPage() async {
+        let generation = requestID
+        cancelPageRequests()
         loading = true; failure = nil; visible = []; originalRefreshes = [:]
+        dates = [:]; orderedPhotos = []; dateFailures = 0; originalMessage = nil
         do {
             var args = ["list", connection.id, "--prefix=\(prefix)", "--limit", "100"]
             if let cursor { args.append("--cursor=\(cursor)") }
             let result = try await PhotoClient.run(args, as: PhotoPage.self)
             try Task.checkCancellation()
+            guard generation == requestID else { return }
             page = result; loading = false
+            orderedPhotos = PhotoDateOrdering.sorted(result.photos, by: .name, dates: dates)
+            sortPage()
         } catch {
-            if !Task.isCancelled { failure = error.localizedDescription; page = nil; loading = false }
+            if !Task.isCancelled && generation == requestID {
+                failure = error.localizedDescription; page = nil; loading = false
+            }
         }
     }
+
+    private func recordDate(_ value: String?, for photo: PhotoItem, generation: UUID) {
+        guard generation == requestID, page?.photos.contains(where: { $0.identity == photo.identity }) == true else { return }
+        let date = PhotoTakenDate(value)
+        // A cached preview without a date must not overwrite a date obtained
+        // later from the explicitly downloaded original.
+        guard date.value != nil || dates[photo.identity]?.value == nil else { return }
+        let changed = dates[photo.identity]?.value != date.value
+        dates[photo.identity] = date
+        if changed && !readingDates && sort != .name, let page {
+            orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: sort, dates: dates)
+        }
+    }
+
+    private func sortPage() {
+        dateTask?.cancel()
+        let generation = UUID()
+        dateRequestID = generation
+        readingDates = false; dateFailures = 0
+        guard let page, !loading else { return }
+        guard sort != .name else {
+            orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: .name, dates: dates)
+            return
+        }
+        let pageGeneration = requestID
+        let choice = sort
+        let connectionID = connection.id
+        // Only the listed page participates. Known camera dates need no request;
+        // an Unknown preview can still gain a date from a local original.
+        let pending = page.photos.filter { dates[$0.identity]?.value == nil }
+        guard !pending.isEmpty else {
+            orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: choice, dates: dates)
+            return
+        }
+        readingDates = true
+        dateTask = Task {
+            let results = await withTaskGroup(of: PhotoDateResult.self) { group in
+                var remaining = pending.makeIterator()
+                for _ in 0..<2 {
+                    if let photo = remaining.next() {
+                        group.addTask { await PhotoDates.read(photo, connectionID: connectionID) }
+                    }
+                }
+                var results: [PhotoDateResult] = []
+                for await result in group {
+                    if Task.isCancelled { group.cancelAll(); break }
+                    results.append(result)
+                    if let photo = remaining.next() {
+                        group.addTask { await PhotoDates.read(photo, connectionID: connectionID) }
+                    }
+                }
+                return results
+            }
+            guard !Task.isCancelled, pageGeneration == requestID, generation == dateRequestID else { return }
+            for result in results {
+                if let date = result.date {
+                    if date.value != nil || dates[result.identity]?.value == nil { dates[result.identity] = date }
+                } else {
+                    dateFailures += 1
+                }
+            }
+            // Publish one ordered page after the batch, keeping tile order
+            // stable while previews and date requests complete out of order.
+            orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: choice, dates: dates)
+            readingDates = false
+        }
+    }
+
     private func open(_ photo: PhotoItem, reveal: Bool) {
         originalTask?.cancel()
+        let generation = requestID
+        let originalGeneration = UUID()
+        originalRequestID = originalGeneration
         opening = photo.key; originalMessage = "Downloading \(photo.name)…"
         originalTask = Task {
             do {
                 let result = try await PhotoClient.run(["open-original", connection.id] + photo.arguments, as: OriginalPhoto.self)
                 try Task.checkCancellation()
+                guard generation == requestID, originalGeneration == originalRequestID else { return }
                 let url = URL(fileURLWithPath: result.originalPath)
+                recordDate(result.dateTaken, for: photo, generation: generation)
                 originalRefreshes[photo.key] = UUID()
                 originalMessage = "Saved \(photo.name) in Downloads / Mountain Turtle."
                 DispatchQueue.global(qos: .userInitiated).async {
                     if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                     else { NSWorkspace.shared.open(url) }
                 }
-            } catch { if !Task.isCancelled { originalMessage = error.localizedDescription } }
-            if !Task.isCancelled { opening = nil }
+            } catch {
+                if !Task.isCancelled && generation == requestID && originalGeneration == originalRequestID {
+                    originalMessage = error.localizedDescription
+                }
+            }
+            if !Task.isCancelled && generation == requestID && originalGeneration == originalRequestID { opening = nil }
         }
     }
 }
@@ -258,6 +395,8 @@ private struct PhotoTile: View {
     let visible: Bool
     let originalRefresh: UUID?
     let opening: Bool
+    let dateTaken: PhotoTakenDate
+    let receivedDate: (String?) -> Void
     let openOriginal: () -> Void
     let downloadOriginal: () -> Void
     @State private var image: NSImage?
@@ -266,6 +405,7 @@ private struct PhotoTile: View {
     @State private var needsOriginal = false
     @State private var createTask: Task<Void, Never>?
     @State private var loadID = UUID()
+    @State private var refreshedOriginal: UUID?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -281,14 +421,17 @@ private struct PhotoTile: View {
                 if loading || opening { ProgressView().controlSize(.small).frame(maxWidth: .infinity).frame(height: 110) }
             }.contentShape(Rectangle()).onTapGesture(count: 2, perform: openOriginal)
             Text(photo.name).font(.callout).lineLimit(1).truncationMode(.middle)
+            Text(dateTaken.label).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                .frame(minHeight: 26)
+                .help("\(dateTaken.label)\nThe camera's recorded date and time. Unknown means no camera date is available.")
             Text(image == nil ? (needsOriginal ? "Preview not available" : message) : "Small preview cached")
                 .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
         }
         .accessibilityRepresentation {
-            Button("\(photo.name), \(image == nil ? message : "small preview cached")", action: openOriginal)
+            Button("\(photo.name), \(dateTaken.label), \(image == nil ? message : "small preview cached")", action: openOriginal)
                 .accessibilityAction(named: Text("Download original"), downloadOriginal)
         }
-        .help("\(photo.name) · \(ByteCountFormatter.string(fromByteCount: photo.size, countStyle: .file))\n\(message)\nDouble-click to download and open the original.")
+        .help("\(photo.name) · \(ByteCountFormatter.string(fromByteCount: photo.size, countStyle: .file))\n\(dateTaken.label)\n\(message)\nDouble-click to download and open the original.")
         .contextMenu {
             Button("Open original", action: openOriginal)
             Button("Download original", action: downloadOriginal)
@@ -301,9 +444,12 @@ private struct PhotoTile: View {
             }
         }
         .task(id: PhotoPreviewRequest(visible: visible, originalRefresh: originalRefresh)) {
-            if visible && image == nil {
+            if let originalRefresh, originalRefresh != refreshedOriginal {
                 // An explicit original download refreshes this tile from local
                 // files only; it must not start another S3 request.
+                await load(allowOriginal: false, cacheOnly: true)
+                if !Task.isCancelled { refreshedOriginal = originalRefresh }
+            } else if visible && image == nil {
                 await load(allowOriginal: false, cacheOnly: originalRefresh != nil)
             }
         }
@@ -323,6 +469,7 @@ private struct PhotoTile: View {
             let result = try await PhotoClient.run(args, as: PhotoPreview.self)
             try Task.checkCancellation()
             guard loadID == generation else { return }
+            receivedDate(result.dateTaken)
             if let path = result.thumbnailPath { image = NSImage(contentsOfFile: path) }
             needsOriginal = result.needsOriginal ?? false
             message = result.message ?? (image == nil ? "Online only" : "Small preview cached")
