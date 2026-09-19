@@ -212,6 +212,13 @@ File contents are fetched on demand and cached on this Mac. A connected volume
 is not a complete offline copy, and Finder previews can trigger downloads.
 Remote latency and valid server credentials still matter for files that are not cached.
 
+Finder shows the remote file's modification time. For S3, rclone reads the saved
+modification time from object metadata, falling back to the S3 last-modified
+time when no saved time exists. This can add metadata requests while browsing;
+it does not download file contents. These dates are not photo capture dates.
+After upgrading from a version that showed a fixed December 31, 1999 or
+January 1, 2000 date, reconnect the drive to refresh Finder's file attributes.
+
 The default original-file cache target is 2 GiB, with removal after 24 hours
 without access. Both values are configurable per drive. Memory buffering,
 rclone read-ahead, parallel chunk prefetch, and native NFS read-ahead are disabled.

@@ -359,6 +359,16 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--vfs-read-chunk-size") + 1], "1Mi")
         self.assertEqual(command[command.index("--vfs-read-chunk-size-limit") + 1], "1Mi")
 
+    def test_mount_preserves_backend_modification_times(self):
+        for backend, remote in (("s3", "s3:photos"), ("sftp", "sftp:/photos")):
+            for read_only in (True, False):
+                with self.subTest(backend=backend, read_only=read_only):
+                    connection = dict(self.connection, backend=backend, readOnly=read_only)
+                    command = turtle.mount_command(connection, self.paths, "/rclone", remote)
+                    self.assertNotIn("--no-modtime", command)
+                    self.assertNotIn("--use-server-modtime", command)
+                    self.assertEqual("--read-only" in command, read_only)
+
     def test_settings_are_saved_and_used_on_next_mount(self):
         with patch.object(turtle, "mount_table", return_value=set()):
             turtle.action(self.args("settings", self.connection["id"], "--cache-max-size-mib", "512",
