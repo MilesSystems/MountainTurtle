@@ -357,6 +357,15 @@ changes. Buckets using several classes show a mixed result; missing metrics
 remain unavailable. Use the refresh button beside the storage class to check
 again, and hover over the value for the observation date and details.
 
+The same card shows **Actual cost** for the completed days of this month and
+**Projected** spending for the full month at the reported daily average. Both
+amounts cover **all S3 buckets and regions in the AWS account**, using Cost
+Explorer's reported currency and retaining credits. The projection assumes that
+the month-to-date daily average continues; recent changes in storage or usage
+can change that pace. Incomplete billing reports do not produce totals or
+projections. Billing refreshes share the existing six-hour cache with Drive
+insights, and the projection itself makes no additional AWS request.
+
 Disconnect through the app or eject the volume in Finder. If a volume is busy,
 close the files or applications using it and try again. Mountain Turtle does not
 force-detach a busy volume or discard its cache. Removing a disconnected saved

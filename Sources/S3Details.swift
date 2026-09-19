@@ -37,6 +37,8 @@ struct S3DetailsRows: View {
                     .accessibilityLabel("Refresh S3 details").help("Refresh S3 type and storage class")
                     .disabled(loading)
             }
+            Divider().padding(.leading, 42)
+            S3CostSummaryRows(connection: connection)
         }.task(id: identity) {
             details = nil; failure = nil
             await load(refresh: false)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read reported account S3 spend from AWS Cost Explorer without changing billing."""
 import argparse
+import calendar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import fcntl
@@ -21,6 +22,7 @@ ASSUMPTIONS = [
     "Includes the completed UTC days of this month returned by AWS. Cost Explorer can lag by 24 hours or longer; AWS marks current-month costs as estimated until finalized.",
     "Negative amounts such as reported credits are preserved. Charges recorded under other AWS services, support and account-wide adjustments are outside this S3 service filter; this is not the total AWS invoice.",
     "Public API storage prices are separate from reported spend. They do not replace negotiated billing rates or establish per-bucket cost attribution.",
+    "Projected month-end S3 spend is a local run-rate estimate: complete reported month-to-date spend divided by completed UTC days, multiplied by this month's calendar days. It uses the same account, service and currency as actual spend, preserves credits, and assumes the daily average continues. It is not an AWS forecast or a final bill; incomplete reports have no projection.",
     "One Cost Explorer request is normally $0.01. Results are cached for six hours per profile and account; refreshing this view reuses that cache. This command never enables billing features or changes permissions.",
 ]
 
@@ -87,6 +89,22 @@ class BillingReader:
         })
 
 
+def projection_details(first, observed_days=0, total=None):
+    days = calendar.monthrange(first.year, first.month)[1]
+    # Like Cost Explorer's periodEnd, this boundary is exclusive, in UTC.
+    month_end = first.replace(day=1) + timedelta(days=days)
+    result = {"projectedTotal": None, "projectionMethod": None, "projectionEstimated": False,
+              "projectedPeriodEnd": month_end.date().isoformat(), "observedDays": observed_days,
+              "daysInMonth": days}
+    if total is not None and observed_days > 0:
+        # Keep the existing Decimal sum through the extrapolation. Do not
+        # round daily averages, drop credits, or change the report's currency.
+        projected = float(total / Decimal(observed_days) * Decimal(days))
+        if math.isfinite(projected):
+            result.update(projectedTotal=projected, projectionMethod="completedDaysRunRate", projectionEstimated=True)
+    return result
+
+
 def parse_costs(response, start, end):
     if not isinstance(response, dict):
         raise metrics.MetricsError("AWS returned an invalid billing response.")
@@ -124,15 +142,20 @@ def parse_costs(response, start, end):
     incomplete = incomplete or len(history) != len(expected)
     if not history:
         return {"status": "noData", "message": "AWS has not returned daily S3 spend for this month. Missing billing data is not zero spend.",
-                "total": None, "currency": None, "estimated": False, "history": []}
-    total = float(sum(amounts, Decimal(0)))
+                "total": None, "currency": None, "estimated": False, "history": [],
+                **projection_details(first)}
+    decimal_total = sum(amounts, Decimal(0))
+    total = float(decimal_total)
     if not math.isfinite(total):
         raise metrics.MetricsError("AWS returned an invalid spend total.")
+    projection = projection_details(first, len(history))
+    if not incomplete and first.day == 1 and end <= projection["projectedPeriodEnd"]:
+        projection = projection_details(first, len(history), decimal_total)
     return {"status": "partial" if incomplete else "available",
             "message": ("AWS returned an incomplete daily report. Available days are shown; the month-to-date total is withheld." if incomplete else
                         "Reported S3 spend for this AWS account, across all buckets and regions. AWS may still revise these costs."),
             "total": None if incomplete else total, "currency": next(iter(currencies)),
-            "estimated": any(point["estimated"] for point in history), "history": history}
+            "estimated": any(point["estimated"] for point in history), "history": history, **projection}
 
 
 def snapshot(connection, paths, reader=None, now=None):
@@ -142,7 +165,8 @@ def snapshot(connection, paths, reader=None, now=None):
     result = {"ok": True, "connectionID": connection["id"], "provider": turtle.connection_backend(connection),
               "source": "AWS Cost Explorer API", "scope": "accountS3AllRegions", "accountID": None,
               "monthStart": start, "periodEnd": end, "queriedAt": now, "cached": False, "total": None,
-              "currency": None, "estimated": False, "history": [], "assumptions": ASSUMPTIONS}
+              "currency": None, "estimated": False, "history": [], "assumptions": ASSUMPTIONS,
+              **projection_details(datetime.fromisoformat(start))}
     if result["provider"] != "s3":
         return dict(result, status="unsupported", message="AWS actual spend is available for S3 connections.")
     if start == end:

@@ -332,6 +332,15 @@ planning inputs.
 
 ## Actual AWS spend
 
+The S3 connection card also uses this account-wide report. Alongside `total`,
+`currency`, and the completed-day billing period, the response includes
+`projectedTotal`, `projectionMethod`, `projectionEstimated`,
+`projectedPeriodEnd` (exclusive UTC boundary), `observedDays`, and `daysInMonth`.
+For a complete report, `completedDaysRunRate` projects the full calendar month
+from the month-to-date daily average, preserving the report's currency and
+credits. Missing or partial reports have no projected total. This local estimate
+does not call the AWS forecast API and reuses cached raw billing responses.
+
 ```text
 python3 service/cloud_billing.py [--resource-dir RESOURCES] costs ID
 ```
