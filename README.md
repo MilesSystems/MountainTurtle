@@ -225,6 +225,14 @@ January 1, 2001 as a placeholder. That value is not the file's original creation
 date. Camera capture dates, when present, remain in the photo's embedded metadata.
 See the [NFSv3 file attributes](https://www.rfc-editor.org/rfc/rfc1813.html#section-2.5).
 
+S3 folder timestamps are also unavailable: these folders are inferred from
+object-name prefixes, and rclone returns an unknown modification time for
+them. Finder can therefore show the 1999/2000 placeholder or a date maintained
+by the current mount session. These are not the original folder dates; the
+file modification-date fix does not recover them. Recovering original folder
+dates requires the source folders or separately preserved metadata. See
+[how S3 folders work](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-folders.html).
+
 The default original-file cache target is 2 GiB, with removal after 24 hours
 without access. Both values are configurable per drive. Memory buffering,
 rclone read-ahead, parallel chunk prefetch, and native NFS read-ahead are disabled.
