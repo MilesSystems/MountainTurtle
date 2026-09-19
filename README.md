@@ -219,6 +219,12 @@ it does not download file contents. These dates are not photo capture dates.
 After upgrading from a version that showed a fixed December 31, 1999 or
 January 1, 2000 date, reconnect the drive to refresh Finder's file attributes.
 
+**Date Created is unavailable on the current NFSv3 mounts.** This protocol does
+not carry a file creation time, so Finder may show December 31, 2000 or
+January 1, 2001 as a placeholder. That value is not the file's original creation
+date. Camera capture dates, when present, remain in the photo's embedded metadata.
+See the [NFSv3 file attributes](https://www.rfc-editor.org/rfc/rfc1813.html#section-2.5).
+
 The default original-file cache target is 2 GiB, with removal after 24 hours
 without access. Both values are configurable per drive. Memory buffering,
 rclone read-ahead, parallel chunk prefetch, and native NFS read-ahead are disabled.
