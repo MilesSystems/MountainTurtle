@@ -1116,7 +1116,7 @@ def ensure_service(paths):
         return
     paths.prepare()
     with (paths.logs / "launcher.log").open("ab", buffering=0) as output:
-        process = subprocess.Popen([sys.executable, str(SERVICE), "--resource-dir", str(paths.resources), "serve"],
+        process = subprocess.Popen([sys.executable, "-B", str(SERVICE), "--resource-dir", str(paths.resources), "serve"],
                                    stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
     for _ in range(30):
         if service_running(paths):
@@ -1201,6 +1201,8 @@ def resume_update_locked(paths):
         time.sleep(0.1)
     with store.update(timeout=5, durable=True) as state:
         state.pop("updateHandoff", None)
+    from offline_photos import resume_after_update
+    resume_after_update(paths)
     return {"ok": True, "resumed": True, "message": "Connection choices restored after the app update."}
 
 
@@ -1208,6 +1210,10 @@ def resume_update(paths):
     # Ordinary launches must not reset choices or start a previously stopped
     # service. Recovery is authorized only by an actual saved handoff marker.
     if update_marker(Store(paths).read()) is None:
+        # Queue holds are their own durable update intent: an interrupted launch
+        # may have cleared the connection marker just before releasing them.
+        from offline_photos import resume_after_update
+        resume_after_update(paths)
         return {"ok": True, "resumed": False}
     with update_handoff_lock(paths):
         return resume_update_locked(paths)
@@ -1242,6 +1248,8 @@ def prepare_update(paths, timeout=90):
                     connection["reconnectRequested"] = False
                     connection["revision"] = connection.get("revision", 0) + 1
             deadline = time.monotonic() + timeout
+            from offline_photos import pause_for_update
+            pause_for_update(paths, deadline)
             mount_prefix = str(paths.mounts) + "/"
             while True:
                 attached = {path for path in mount_table() if path.startswith(mount_prefix)}
@@ -1311,7 +1319,7 @@ def set_autostart(paths, enabled):
     domain = f"gui/{os.getuid()}"
     if enabled:
         paths.plist.write_bytes(plistlib.dumps({
-            "Label": LABEL, "ProgramArguments": [sys.executable, str(SERVICE), "--resource-dir", str(paths.resources),
+            "Label": LABEL, "ProgramArguments": [sys.executable, "-B", str(SERVICE), "--resource-dir", str(paths.resources),
                                                    "serve", "--at-login"],
             "AssociatedBundleIdentifiers": ["io.mountainturtle.app"],
             "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30,

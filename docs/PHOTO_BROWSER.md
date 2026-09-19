@@ -57,7 +57,8 @@ Successful thumbnail:
   "source": "embedded-jpeg",
   "downloadedBytes": 131072,
   "needsOriginal": false,
-  "dateTaken": "2026-09-11T13:34:50"
+  "dateTaken": "2026-09-11T13:34:50",
+  "dateState": "known"
 }
 ```
 
@@ -66,14 +67,24 @@ Successful thumbnail:
 `thumbnailPath: null`, `needsOriginal: true`, and an explanation; it is a usable
 placeholder result rather than a reason to download the full original silently.
 Original retrieval returns `originalPath`, `source`, `downloadedBytes`, and
-nullable `dateTaken`.
+nullable `dateTaken`, and `dateState`.
 Errors use `{"ok":false,"error":"explanation"}` and a nonzero exit status.
 Cancellation exits with status 130.
 
 ## Date taken and sorting
 
-Photo tiles show **Date taken** from EXIF `DateTimeOriginal`, or **Unknown** when
-that value is unavailable. The native helper reads ImageIO properties without
+Photo tiles show **Date taken** from EXIF `DateTimeOriginal`. Missing dates use
+these explicit `dateState` values:
+
+| Value | Label | Meaning |
+| --- | --- | --- |
+| `notChecked` | Not checked | No metadata read has completed yet. |
+| `needsOriginal` | Needs original | The bounded header did not contain a date, or this format needs its complete original. |
+| `noCameraDate` | No camera date | A readable complete original contains no valid camera capture date. |
+| `error` | Couldn't read—retry | Metadata could not be read; retry can try again. |
+| `known` | The camera date | A valid capture date was found. |
+
+The native helper reads ImageIO properties without
 decoding image pixels. If a bounded JPEG header ends before its image frame,
 it also checks complete EXIF APP1 segments within those first 128 KiB for
 `DateTimeOriginal`, validating TIFF byte order, directory counts, and offsets.
@@ -88,17 +99,20 @@ scoped to the connection, bucket, profile, region, key, ETag, and size. Opening 
 original can resolve a date that was unavailable in a header or unsupported
 online format. A cached thumbnail alone is not a source for the original's date.
 
-The explicit `date-taken` operation returns `ok`, nullable `dateTaken`, and
+The explicit `date-taken` operation returns `ok`, nullable `dateTaken`, `dateState`, and
 `downloadedBytes`. It reuses a verified complete local original when available;
 otherwise it can request only the first 128 KiB of a JPEG, conditional on the
 listed ETag. It never fetches a full large original for a date. Other formats
-remain Unknown until a complete original is locally available. `--cache-only`
-forbids remote reads. Missing metadata is cached, but a newly available complete
-original can replace that result.
+show **Needs original** until a complete original is locally available. `--cache-only`
+forbids remote reads and returns **Not checked** when nothing has been inspected.
+Missing metadata is cached only after a successful read. Helper failures remain
+retryable, and a newly available complete original can replace an earlier
+**Needs original** result. Legacy negative cache entries are rechecked before
+claiming that a complete photo has no camera date.
 
 **Sort this page** offers name, newest date taken, and oldest date taken. Date
 sorting reads dates for the current page with at most two photo requests in
-flight, then orders known dates by recorded camera time with Unknown dates last.
+flight, then orders known dates by recorded camera time with missing dates last.
 Name provides a deterministic tie-break. This does not sort the entire bucket or
 scan additional pages. Choosing date sorting can read up to 128 KiB per uncached
 JPEG on the page even when small previews are disabled. Navigation and dismissal
@@ -146,6 +160,46 @@ safe basename. They are retained as user files, separate from the bounded
 thumbnail cache. A locally modified download is preserved; a fresh remote copy
 gets a different filename. Editing that local file does not upload it to S3.
 Opening an original also makes it available for later thumbnail generation.
+
+## Durable offline queue
+
+**Keep offline** adds selected photos to `service/offline_photos.py`. Unlike the
+single-photo `open-original` convenience action, this queue persists progress,
+checksums, and pause intent outside the evictable cache. It runs one detached
+worker per connection and uses conditional 8 MiB S3 range reads. Pause stops the
+active request and retains the last committed, hashed prefix; resume validates
+that prefix before requesting the remaining ranges.
+
+```text
+offline_photos.py status ID
+offline_photos.py enqueue ID --items-json '[{"key":"photo.jpg","etag":"version","size":1234}]'
+offline_photos.py pause ID
+offline_photos.py resume ID
+offline_photos.py retry ID --item-id ITEM
+offline_photos.py verify ID --item-id ITEM
+offline_photos.py open ID --item-id ITEM
+```
+
+As with the photo browser, optional `--resource-dir PATH` precedes the command.
+Status reads local records only. Responses include `paused`, `workerRunning`,
+`items`, and aggregate `totals`. Each item includes its version identity, state,
+byte progress, any error, and a local path after completion. The native UI must
+not treat all completed byte counts as verified.
+
+Originals are retained under
+`~/Library/Application Support/Mountain Turtle/offline-photos/`, in folders scoped
+to the connection and bucket. Cache cleanup does not remove them. Completed
+files are checked against S3's supported `FULL_OBJECT` checksum and reread with
+local SHA-256. State `verified` means both checks passed; `downloaded` means the
+conditional transfer and local check passed but a supported cloud checksum was
+unavailable. Composite/multipart checksums and ETags are not assumed to be
+full-object content hashes. Later **Check copy** and **Open** validate the local
+SHA-256 without a network request.
+
+The queue never overwrites a changed local original, does not upload edits, and
+preserves an older retained version when a new cloud version is selected.
+Metadata reads and thumbnails can reuse retained originals. App updates pause
+workers before replacing their code and restore prior queue intent afterward.
 
 ## Cache, concurrency, and cancellation
 
