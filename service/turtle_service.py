@@ -582,10 +582,12 @@ def connection_config(connection, paths):
 def mount_command(connection, paths, rclone, remote, rc_port=None):
     identity = connection["id"]
     cache = cache_settings(connection)
+    # Keep backend modification times: --no-modtime exposes rclone's fixed
+    # 2000-01-01 fallback in Finder. S3 reads the saved mtime via object metadata.
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
                "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
-               "--no-modtime", "--noappledouble", "--noapplexattr", "--umask", "077",
+               "--noappledouble", "--noapplexattr", "--umask", "077",
                "--file-perms", "0600", "--dir-perms", "0700",
                "--filter", "+ /._.", "--filter", "+ /._.VolumeIcon.icns",
                "--filter", "- .DS_Store", "--filter", "- ._*",
