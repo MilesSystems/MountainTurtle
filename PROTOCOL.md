@@ -62,9 +62,9 @@ Both commands accept these common flags:
 [--cache-max-size-mib N] [--cache-max-age-hours N]
 ```
 
-The default is read-only with auto-connect disabled. `--backend` defaults to
+New connections default to read-only with auto-connect disabled. `--backend` defaults to
 `s3`, including on edit: callers editing SFTP must send `--backend sftp` and the
-complete SFTP fields. Cache fields omitted on edit preserve their previous
+complete SFTP fields. Access and cache fields omitted on edit preserve their previous
 values; other omitted flags use their parser defaults. Success returns the
 saved connection's `id`.
 
@@ -233,6 +233,7 @@ or canceling either review. No import modifies global `~/.ssh` files or config.
 | `login ID` | S3 only: AWS SSO device authorization with a five-minute timeout. |
 | `refresh ID` | Mounted only: invalidates rclone directory listings via SIGHUP without fetching file bodies. |
 | `rename ID --name NAME` | Disconnected only; preserves remote destination and cache identity. |
+| `access ID --read-only\|--read-write` | Disconnected only when changing mode; rejects pending/ambiguous writes and preserves destination, cache, authentication, and startup preferences. An unchanged mode is a no-op. |
 | `settings ID [--cache-max-size-mib N] [--cache-max-age-hours N]` | Disconnected only; size 64–1,048,576 MiB, age 1–8,760 hours, soft eviction targets. |
 | `cache-info ID` | Bounded local scan returns `ok`, `usedBytes`, `files`, `partial`; partial usage is a lower estimate. |
 | `clear-cache ID` | Disconnected only; rejects pending/ambiguous writes, including previously writable caches. |
@@ -242,7 +243,10 @@ or canceling either review. No import modifies global `~/.ssh` files or config.
 
 Clear-cache affects the local rclone cache, not remote files, explicit Downloads
 copies, or the photo thumbnail cache. The GUI saves connection intent, safely
-ejects, waits, applies rename/settings/clear-cache, then restores that intent.
+ejects, waits, applies rename/access/settings/clear-cache, then restores that intent.
+Access changes use the same safe ejection path for S3 and SFTP. The saved access
+mode stays unchanged if a drive is busy, cached uploads are still pending, or the
+save fails. The next mount uses the chosen read-only or read/write mode.
 
 ## Finder actions and helpers
 
@@ -270,6 +274,21 @@ APIs. Its private registry preserves unrelated Finder favorites. That API is
 deprecated; Finder's manual Add to Sidebar is the fallback.
 
 ## Photo, activity, and metrics services
+
+The S3 connection card reads bucket type and observed storage classes separately
+from the frequent status poll:
+
+```text
+python3 service/s3_details.py [--resource-dir RESOURCES] details ID [--refresh]
+```
+
+The JSON includes `bucketType`, `storageClass`, `storageClasses`, `status`,
+`message`, `sourceTimestamp`, `queriedAt`, `cached`, and `isStale`. Bucket type
+uses AWS's reserved naming rules. Storage classes use the existing bounded,
+read-only CloudWatch storage reader without listing objects or fetching prices.
+Multiple classes are labeled mixed; missing, partial, stale, and authentication
+results remain explicit. Results are cached per connection and bucket/profile/
+region for one hour (five minutes for failures); `--refresh` bypasses that cache.
 
 The independent `photo_browser.py` CLI is **S3-only**; see
 [photo browser protocol](docs/PHOTO_BROWSER.md).

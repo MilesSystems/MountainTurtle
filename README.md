@@ -346,6 +346,17 @@ the saved account's permissions. The isolated SFTP fixture has separate live
 write verification; its results do not establish write durability for every
 server or S3 bucket.
 
+To change a saved drive’s access, choose **Change…** beside **Access**, toggle
+**Read only**, and choose **Save access**. A connected drive safely ejects and
+reconnects to apply the setting. Open files or pending uploads prevent the change
+until they are closed or finished.
+
+S3 connection details show **S3 type** and **Storage class** above **AWS profile**.
+Storage classes come from AWS daily storage metrics, so they can lag recent
+changes. Buckets using several classes show a mixed result; missing metrics
+remain unavailable. Use the refresh button beside the storage class to check
+again, and hover over the value for the observation date and details.
+
 Disconnect through the app or eject the volume in Finder. If a volume is busy,
 close the files or applications using it and try again. Mountain Turtle does not
 force-detach a busy volume or discard its cache. Removing a disconnected saved

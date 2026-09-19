@@ -227,9 +227,9 @@ enum ServiceClient {
         }
     }
 
-    static func run(_ arguments: [String], standardInput: Data? = nil) async throws -> Data {
+    static func run(_ arguments: [String], standardInput: Data? = nil, scriptName: String = "turtle_service.py") async throws -> Data {
         let resources = self.resources
-        let script = resources.appendingPathComponent("service/turtle_service.py")
+        let script = resources.appendingPathComponent("service/\(scriptName)")
         guard FileManager.default.fileExists(atPath: script.path) else {
             throw TurtleError(message: "The mount service is missing from this app. Rebuild Mountain Turtle with the included build script.")
         }
@@ -411,16 +411,20 @@ enum ServiceClient {
             let initial = try JSONDecoder().decode(StatusResponse.self, from: await ServiceClient.run(["status"]))
             guard let current = initial.connections.first(where: { $0.id == connection.id }) else { throw TurtleError(message: "This connection was removed.") }
             guard !current.isWorking else { throw TurtleError(message: "Wait for this drive to finish connecting or ejecting, then try again.") }
-            restore = current.desiredConnected
+            restore = current.desiredConnected || current.isMounted
             if current.isMounted || current.desiredConnected {
-                try await request(["disconnect", connection.id])
                 beganDisconnect = true
+                try await request(["disconnect", connection.id])
                 var ejected = false
                 for attempt in 0..<150 {
                     let status = try JSONDecoder().decode(StatusResponse.self, from: await ServiceClient.run(["status"]))
                     guard let live = status.connections.first(where: { $0.id == connection.id }) else { throw TurtleError(message: "This connection was removed.") }
                     if !live.isMounted && live.state == "disconnected" { ejected = true; break }
                     if attempt > 2 && live.state == "error" { throw TurtleError(message: live.message ?? "The drive could not eject. Close files using it, then try again.") }
+                    if attempt > 2, let message = live.message,
+                       message.hasPrefix("Drive is busy.") || message.hasPrefix("Waiting for pending uploads") {
+                        throw TurtleError(message: message)
+                    }
                     try await Task.sleep(nanoseconds: 500_000_000)
                 }
                 guard ejected else { throw TurtleError(message: "The drive is still ejecting. Wait for it to disconnect, then try again.") }
@@ -428,7 +432,12 @@ enum ServiceClient {
             try await request(arguments)
             if restore { try await request(["connect", connection.id]) }
             await refresh()
-            driveMessage = arguments.first == "rename" ? "Drive renamed. Its remote files and cached copies are unchanged." : arguments.first == "clear-cache" ? "Local cache cleared." : "Download settings saved."
+            switch arguments.first {
+            case "rename": driveMessage = "Drive renamed. Its remote files and cached copies are unchanged."
+            case "clear-cache": driveMessage = "Local cache cleared."
+            case "access": driveMessage = "Access setting saved." + (restore ? " The drive is reconnecting." : "")
+            default: driveMessage = "Download settings saved."
+            }
             return true
         } catch {
             let failure = error.localizedDescription
@@ -527,6 +536,7 @@ struct MainView: View {
             case .metrics: DriveMetricsView(connection: panel.connection)
             case .settings: DriveSettingsView(model: model, connection: panel.connection)
             case .rename: RenameDriveView(model: model, connection: panel.connection)
+            case .access: DriveAccessView(model: model, connection: panel.connection)
             }
         }
         .alert("Couldn’t finish that action", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
@@ -548,6 +558,10 @@ struct MainView: View {
         }
         .onChange(of: showAdd || showSetup || editing != nil || model.drivePanel != nil || removing != nil) { _, presented in
             model.otherSheetPresented = presented
+        }
+        .onChange(of: model.selectedID) { _, _ in
+            model.driveMessage = nil
+            model.loginMessage = nil
         }
         .onAppear { model.start() }
     }
@@ -664,6 +678,8 @@ struct MainView: View {
                         }
                         Button("Drive insights…") { model.drivePanel = DrivePanel(connection: connection, kind: .metrics) }
                         Button("Download & cache settings…") { model.drivePanel = DrivePanel(connection: connection, kind: .settings) }
+                        Button("Change access…") { model.drivePanel = DrivePanel(connection: connection, kind: .access) }
+                            .disabled(connection.isWorking || model.activeAction != nil)
                         Button("Rename drive…") { model.drivePanel = DrivePanel(connection: connection, kind: .rename) }
                         Divider()
                         Button("Refresh folder listings") { Task { await model.action(["refresh", connection.id]) } }.disabled(!connection.isConnected)
@@ -746,12 +762,21 @@ struct MainView: View {
                     } else {
                         infoRow("S3 bucket", connection.bucket, symbol: "shippingbox")
                         Divider().padding(.leading, 42)
+                        S3DetailsRows(connection: connection)
+                            .id([connection.id, connection.bucket, connection.profile, connection.region])
+                        Divider().padding(.leading, 42)
                         infoRow("AWS profile", connection.profile, symbol: "person.crop.circle")
                         Divider().padding(.leading, 42)
                         infoRow("Region", connection.region, symbol: "globe.americas")
                     }
                     Divider().padding(.leading, 42)
-                    infoRow("Access", connection.readOnly ? "Read only" : "Read & write", symbol: connection.readOnly ? "lock" : "pencil")
+                    HStack(spacing: 12) {
+                        infoRow("Access", connection.readOnly ? "Read only" : "Read & write", symbol: connection.readOnly ? "lock" : "pencil")
+                        Button("Change…") { model.drivePanel = DrivePanel(connection: connection, kind: .access) }
+                            .buttonStyle(.link).font(.system(size: 12))
+                            .disabled(connection.isWorking || model.activeAction != nil)
+                            .accessibilityLabel("Change drive access")
+                    }
                     Divider().padding(.leading, 42)
                     infoRow("At login", connection.autoConnect ? "Reconnect this drive" : "Connect manually", symbol: "arrow.clockwise")
                 }.padding(.horizontal, 16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 16))

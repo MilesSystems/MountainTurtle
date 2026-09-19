@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 struct DrivePanel: Identifiable {
-    enum Kind { case settings, rename, photos, metrics }
+    enum Kind { case settings, rename, photos, metrics, access }
     let id = UUID()
     var connection: Connection
     var kind: Kind
@@ -16,6 +16,54 @@ struct CacheInformation: Decodable {
     var summary: String {
         let size = ByteCountFormatter.string(fromByteCount: usedBytes, countStyle: .file)
         return "\(partial ? "At least " : "")\(size) in \(files.formatted()) cached files"
+    }
+}
+
+struct DriveAccessView: View {
+    @ObservedObject var model: AppModel
+    let connection: Connection
+    @Environment(\.dismiss) private var dismiss
+    @State private var readOnly = true
+    @State private var saving = false
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Label("Drive access", systemImage: "lock.open").font(.title2.weight(.semibold))
+            Text(connection.name).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Read only", isOn: $readOnly).toggleStyle(.checkbox).disabled(saving)
+                Text(readOnly ? "Browse and download. Remote changes are disabled."
+                     : "Saving, moving, or deleting files in Finder changes the remote files, using your account’s permissions.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                .background(cream).clipShape(RoundedRectangle(cornerRadius: 12))
+            if connection.isMounted || connection.desiredConnected {
+                Text("Mountain Turtle will safely eject and reconnect this drive to apply the change. Close open files first; pending uploads must finish.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let failure {
+                Label(failure, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
+                Spacer()
+                if saving { ProgressView().controlSize(.small) }
+                Button(saving ? "Applying…" : "Save access") {
+                    saving = true; failure = nil
+                    Task {
+                        if await model.updateDrive(connection, arguments: ["access", connection.id, readOnly ? "--read-only" : "--read-write"]) { dismiss() }
+                        else { failure = model.error; model.error = nil }
+                        saving = false
+                    }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(saving || model.activeAction != nil || readOnly == connection.readOnly)
+            }
+        }.padding(28).frame(width: 470).tint(moss)
+            .onAppear { readOnly = connection.readOnly }
+            .interactiveDismissDisabled(saving)
     }
 }
 

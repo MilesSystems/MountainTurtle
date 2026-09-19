@@ -1370,7 +1370,7 @@ def parser():
         access = operation.add_mutually_exclusive_group()
         access.add_argument("--read-only", action="store_true", dest="read_only")
         access.add_argument("--read-write", action="store_false", dest="read_only")
-        operation.set_defaults(read_only=True)
+        operation.set_defaults(read_only=True if command == "add" else None)
         operation.add_argument("--auto-connect", action="store_true")
         operation.add_argument("--cache-max-size-mib", type=int)
         operation.add_argument("--cache-max-age-hours", type=int)
@@ -1383,6 +1383,11 @@ def parser():
     settings.add_argument("id")
     settings.add_argument("--cache-max-size-mib", type=int)
     settings.add_argument("--cache-max-age-hours", type=int)
+    access = commands.add_parser("access")
+    access.add_argument("id")
+    mode = access.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--read-only", action="store_true", dest="read_only")
+    mode.add_argument("--read-write", action="store_false", dest="read_only")
     commands.add_parser("autostart").add_argument("setting", choices=("on", "off"))
     commands.add_parser("serve").add_argument("--at-login", action="store_true")
     commands.add_parser("shutdown")
@@ -1522,7 +1527,8 @@ def action(args, paths):
                 connection.pop(key, None)
             connection.update(fields)
             connection.update(name=name, backend=args.backend,
-                              readOnly=args.read_only, autoConnect=args.auto_connect, desiredConnected=False,
+                              readOnly=args.read_only if args.read_only is not None else connection.get("readOnly", True),
+                              autoConnect=args.auto_connect, desiredConnected=False,
                               updatedAt=time.time(), revision=connection.get("revision", 0) + 1)
             connection.update(settings)
         else:
@@ -1533,6 +1539,17 @@ def action(args, paths):
                 state["connections"].remove(connection)
                 if connection.get("passwordConfigured"):
                     credential_to_remove = identity
+            elif args.command == "access":
+                if connection["readOnly"] == args.read_only:
+                    return {"ok": True, "id": identity, "changed": False}
+                assert_disconnected(connection, store.runtime(), mounted, paths)
+                # Check the entire cache, including data left by an earlier
+                # writable session, before changing the next mount's access.
+                if pending_writes(dict(connection, readOnly=False), paths):
+                    raise ValueError("Upload pending cached changes before changing this drive's access")
+                connection["readOnly"] = args.read_only
+                connection["updatedAt"] = time.time()
+                connection["revision"] = connection.get("revision", 0) + 1
             elif args.command in ("rename", "settings", "clear-cache"):
                 assert_disconnected(connection, store.runtime(), mounted, paths)
                 if args.command == "rename":
