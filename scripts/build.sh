@@ -227,6 +227,11 @@ with (extension / "Info.plist").open("wb") as stream:
 (extension / "PkgInfo").write_bytes(b"XPC!????")
 PY
 
+# Finder may attach presentation metadata to bundles built inside Documents.
+# Remove only the two attributes that codesign rejects, preserving all others.
+/usr/bin/xattr -dr com.apple.FinderInfo "$APP_PATH" 2>/dev/null || true
+/usr/bin/xattr -dr com.apple.ResourceFork "$APP_PATH" 2>/dev/null || true
+
 SIGN_FLAGS=(--force --sign "$CODE_SIGN_IDENTITY" --timestamp=none)
 if [[ "$CODE_SIGN_IDENTITY" != - ]]; then
     SIGN_FLAGS+=(--options runtime)

@@ -28,7 +28,7 @@ private enum MetricsClient {
                         guard let python = ServiceClient.pythonPath else { throw TurtleError(message: "Python is unavailable.") }
                         let process = Process(), output = Pipe()
                         process.executableURL = URL(fileURLWithPath: python)
-                        process.arguments = [ServiceClient.resources.appendingPathComponent("service/\(script)").path,
+                        process.arguments = ["-B", ServiceClient.resources.appendingPathComponent("service/\(script)").path,
                                              "--resource-dir", ServiceClient.resources.path] + arguments
                         process.standardOutput = output; process.standardError = FileHandle.nullDevice
                         process.standardInput = FileHandle.nullDevice

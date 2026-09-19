@@ -37,6 +37,10 @@ class Cancelled(BrowserError):
     pass
 
 
+class MetadataUnreadable(BrowserError):
+    """A helper ran successfully but could not inspect this image/prefix."""
+
+
 def cancel(*_):
     raise Cancelled("Photo request cancelled.")
 
@@ -204,7 +208,18 @@ def extract_date_taken(source, paths):
     result = run_process([str(helper), str(source)], timeout=DATE_HELPER_TIMEOUT)
     if len(result) > 4096:
         raise ValueError("Invalid photo metadata response.")
-    return checked_date_taken(json.loads(result)["dateTaken"])
+    response = json.loads(result)
+    value = checked_date_taken(response["dateTaken"])
+    readable = response.get("metadataReadable", True)  # Compatible with older helpers.
+    if not isinstance(readable, bool):
+        raise ValueError("Invalid photo metadata response.")
+    if value is None and not readable:
+        raise MetadataUnreadable("The image metadata could not be read.")
+    return value
+
+
+def date_result(value=None, state="notChecked"):
+    return {"dateTaken": value, "dateState": "known" if value is not None else state}
 
 
 class PhotoBrowser:
@@ -321,6 +336,12 @@ class PhotoBrowser:
                 "hiddenFileCount": hidden}
 
     def cached_original(self, key, etag, size):
+        # Durable offline originals live outside the evictable preview/VFS cache.
+        # The queue validates identity and local file evidence before returning a path.
+        from offline_photos import offline_original
+        offline = offline_original(self.connection, self.paths, key, etag, size)
+        if offline is not None:
+            return offline
         downloaded = self.artifacts / (self.identity(key, etag, size) + ".original")
         try:
             info = limited_json(self.safe_path(downloaded), 64 * 1024)
@@ -371,9 +392,18 @@ class PhotoBrowser:
         target = self.safe_path(self.artifacts / (digest + ".date-taken"))
         try:
             record = limited_json(target, 4096)
-            if record["version"] != 1 or not isinstance(record["complete"], bool):
+            if record["version"] not in (1, 2) or not isinstance(record["complete"], bool):
                 return None
-            checked_date_taken(record["dateTaken"])
+            value = checked_date_taken(record["dateTaken"])
+            if record["version"] == 1:
+                # Older helpers returned null for unreadable complete images too.
+                # Reinspect those negatives before claiming there is no camera date.
+                if value is None and record["complete"]:
+                    return None
+                record.update(date_result(value, "needsOriginal"))
+            elif record.get("dateState") != ("known" if value is not None else
+                                               "noCameraDate" if record["complete"] else "needsOriginal"):
+                return None
             return record
         except (OSError, ValueError, TypeError, KeyError):
             return None
@@ -382,21 +412,27 @@ class PhotoBrowser:
         # Called while holding the object lock, shared with all thumbnail sizes.
         record = self.date_record(digest)
         if record and (record["dateTaken"] is not None or record["complete"] or not complete):
-            return record["dateTaken"]
+            return date_result(record["dateTaken"], record["dateState"])
         value = None
         if source is not None:
             try:
                 value = checked_date_taken(self.extractor(source))
             except Cancelled:
                 raise
+            except MetadataUnreadable:
+                if complete:
+                    return date_result(state="error")
+                # A bounded prefix may end before enough image structure is
+                # available. It cannot establish that the original has no date.
             except (OSError, ValueError, TypeError, KeyError, BrowserError, subprocess.SubprocessError):
                 # Optional metadata failures must not expose subprocess output or
                 # prevent viewing a photo. Do not cache a transient helper failure
                 # as a permanently missing date. Cancellation still propagates.
-                return record["dateTaken"] if record else None
+                return date_result(state="error")
+        result = date_result(value, "noCameraDate" if complete else "needsOriginal")
         self.save_artifact(self.artifacts / (digest + ".date-taken"),
-                           {"version": 1, "dateTaken": value, "complete": complete})
-        return value
+                           dict(result, version=2, complete=complete))
+        return result
 
     def fetch_header(self, key, etag, size, destination):
         expected = min(size, HEADER_BYTES)
@@ -411,10 +447,11 @@ class PhotoBrowser:
         with self.key_lock(digest):
             record = self.date_record(digest)
             if record and (record["dateTaken"] is not None or record["complete"]):
-                return {"ok": True, "dateTaken": record["dateTaken"], "downloadedBytes": 0}
+                return dict(date_result(record["dateTaken"], record["dateState"]), ok=True, downloadedBytes=0)
             source = self.cached_original(key, etag, size)
             if source is None and (record is not None or cache_only):
-                return {"ok": True, "dateTaken": None, "downloadedBytes": 0}
+                return dict(date_result(state=record["dateState"] if record else "notChecked"),
+                            ok=True, downloadedBytes=0)
             downloaded = 0
             with self.slot(), tempfile.TemporaryDirectory(prefix="work-", dir=self.base) as work:
                 complete = source is not None
@@ -422,9 +459,9 @@ class PhotoBrowser:
                     source = Path(work) / "header.jpg"
                     downloaded = self.fetch_header(key, etag, size, source)
                     complete = downloaded == size
-                value = self.capture_date(digest, source, complete)
+                result = self.capture_date(digest, source, complete)
                 self.trim()
-                return {"ok": True, "dateTaken": value, "downloadedBytes": downloaded}
+                return dict(result, ok=True, downloadedBytes=downloaded)
 
     def thumbnail(self, key, etag, size, pixels=256, allow_original=False, cache_only=False):
         self.validate_photo(key, etag, size)
@@ -438,29 +475,29 @@ class PhotoBrowser:
             self.safe_path(target)
             self.safe_path(unavailable)
             record = self.date_record(digest)
-            date_taken = record["dateTaken"] if record else None
+            date = date_result(record["dateTaken"], record["dateState"]) if record else date_result()
             source = self.cached_original(key, etag, size)
             if target.is_file():
-                refresh_date = source is not None and (record is None or (date_taken is None and not record["complete"]))
+                refresh_date = source is not None and (record is None or (date["dateTaken"] is None and not record["complete"]))
                 if refresh_date:
                     with self.slot():
-                        date_taken = self.capture_date(digest, source, complete=True)
+                        date = self.capture_date(digest, source, complete=True)
                 os.utime(target, None)
                 if refresh_date:
                     self.trim()
                 return {"ok": True, "thumbnailPath": str(target), "source": "thumbnail-cache", "downloadedBytes": 0,
-                        "needsOriginal": False, "dateTaken": date_taken}
+                        "needsOriginal": False, **date}
             downloaded = 0
             origin = "original-cache"
             with self.slot(), tempfile.TemporaryDirectory(prefix="work-", dir=self.base) as work:
                 work = Path(work)
                 if source is not None:
-                    date_taken = self.capture_date(digest, source, complete=True)
+                    date = self.capture_date(digest, source, complete=True)
                 if source is None and not cache_only:
                     if PurePosixPath(key).suffix.lower() in (".jpg", ".jpeg") and not unavailable.exists():
                         header = work / "header.jpg"
                         downloaded += self.fetch_header(key, etag, size, header)
-                        date_taken = self.capture_date(digest, header, complete=header.stat().st_size == size)
+                        date = self.capture_date(digest, header, complete=header.stat().st_size == size)
                         embedded = jpeg_thumbnail(header.read_bytes())
                         if embedded:
                             source = work / "embedded.jpg"
@@ -475,14 +512,16 @@ class PhotoBrowser:
                         downloaded += source.stat().st_size
                         if source.stat().st_size != size:
                             raise BrowserError("The original download was incomplete. Try again.")
-                        date_taken = self.capture_date(digest, source, complete=True)
+                        date = self.capture_date(digest, source, complete=True)
                         origin = "downloaded-original"
                 if source is None:
                     if not cache_only:
+                        if date["dateState"] == "notChecked":
+                            date = date_result(state="needsOriginal")
                         self.save_artifact(unavailable, {"needsOriginal": True})
                         self.trim()
                     return {"ok": True, "thumbnailPath": None, "source": "unavailable", "downloadedBytes": downloaded,
-                            "needsOriginal": True, "dateTaken": date_taken,
+                            "needsOriginal": True, **date,
                             "message": "No cached or embedded preview. Open or download the original to preview it."}
                 rendered = work / "thumbnail.jpg"
                 self.renderer(source, rendered, pixels)
@@ -491,7 +530,7 @@ class PhotoBrowser:
                 unavailable.unlink(missing_ok=True)
                 self.trim()
                 return {"ok": True, "thumbnailPath": str(target), "source": origin, "downloadedBytes": downloaded,
-                        "needsOriginal": False, "dateTaken": date_taken}
+                        "needsOriginal": False, **date}
 
     def open_original(self, key, etag, size):
         self.validate_photo(key, etag, size)
@@ -511,10 +550,10 @@ class PhotoBrowser:
             source = self.cached_original(key, etag, size)
             if source and source.resolve().is_relative_to(directory.resolve()):
                 with self.slot():
-                    date_taken = self.capture_date(digest, source, complete=True)
+                    date = self.capture_date(digest, source, complete=True)
                     self.trim()
                 return {"ok": True, "originalPath": str(source), "source": "download-cache", "downloadedBytes": 0,
-                        "dateTaken": date_taken}
+                        **date}
             if target.exists():
                 # Never replace a user's locally edited or untracked download.
                 target = directory / (digest[:16] + "-" + str(time.time_ns()) + "-" + name)
@@ -531,10 +570,10 @@ class PhotoBrowser:
                 self.safe_path(target)
                 temporary.replace(target)
                 self.save_artifact(marker, {"path": str(target), "mtimeNs": target.stat().st_mtime_ns})
-                date_taken = self.capture_date(digest, target, complete=True)
+                date = self.capture_date(digest, target, complete=True)
                 self.trim()
                 return {"ok": True, "originalPath": str(target), "source": "original-cache" if source else "downloaded-original",
-                        "downloadedBytes": 0 if source else size, "dateTaken": date_taken}
+                        "downloadedBytes": 0 if source else size, **date}
 
 
 def parser():

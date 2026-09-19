@@ -48,6 +48,13 @@ let output: [String: Any] = [
     "sizeIdentityDiffers": old.identity != PhotoIdentity(key: old.key, etag: old.etag, size: 101),
     "keyIdentityDiffers": old.identity != PhotoIdentity(key: "other", etag: old.etag, size: old.size),
     "changedVersionHasNoDate": dates[PhotoIdentity(key: old.key, etag: "version-two", size: old.size)] == nil,
+    "states": ["known", "notChecked", "needsOriginal", "noCameraDate", "error", "future-state"].map {
+        PhotoTakenDate(nil, state: $0).label(locale: Locale(identifier: "en_US"))
+    },
+    "validDateOverridesMissingState": PhotoTakenDate(sample.value, state: "needsOriginal").state.rawValue,
+    "knownSurvivesPreview": PhotoTakenDate(nil, state: "needsOriginal").preservingMoreComplete(sample).value ?? "missing",
+    "completeMissingSurvivesPreview": PhotoTakenDate(nil, state: "needsOriginal").preservingMoreComplete(PhotoTakenDate(nil, state: "noCameraDate")).state.rawValue,
+    "retryCanRecover": PhotoTakenDate(sample.value, state: "known").preservingMoreComplete(PhotoTakenDate(nil, state: "error")).value ?? "missing",
 ]
 let data = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
 print(String(decoding: data, as: UTF8.self))
@@ -89,10 +96,23 @@ class PhotoDateSortingTests(unittest.TestCase):
     def test_name_sort_ignores_dates_and_uses_natural_filename_order(self):
         self.assertEqual(self.result["name"], ["same1", "same2", "unknown-a", "invalid", "middle", "old", "unknown-z"])
 
-    def test_missing_invalid_or_noncanonical_dates_remain_unknown(self):
-        self.assertEqual(self.result["invalidLabels"], ["Date taken: Unknown"] * 8)
+    def test_missing_invalid_or_noncanonical_dates_are_not_presented_as_camera_dates(self):
+        self.assertEqual(self.result["invalidLabels"], ["Date taken: Not checked"] * 8)
         self.assertEqual(self.result["canonical"], "2026-09-11T13:34:00")
         self.assertEqual(self.result["leapDate"], "2024-02-29T00:15:00")
+
+    def test_missing_date_states_explain_the_next_action(self):
+        self.assertEqual(self.result["states"], [
+            "Date taken: Couldn’t read—retry", "Date taken: Not checked",
+            "Date taken: Needs original", "Date taken: No camera date",
+            "Date taken: Couldn’t read—retry", "Date taken: Not checked",
+        ])
+        self.assertEqual(self.result["validDateOverridesMissingState"], "known")
+
+    def test_partial_preview_does_not_erase_complete_original_result(self):
+        self.assertEqual(self.result["knownSurvivesPreview"], self.result["canonical"])
+        self.assertEqual(self.result["completeMissingSurvivesPreview"], "noCameraDate")
+        self.assertEqual(self.result["retryCanRecover"], self.result["canonical"])
 
     def test_display_keeps_camera_wall_time_in_different_system_timezones(self):
         label = self.result["label"].replace("\u202f", " ").replace("\u00a0", " ")

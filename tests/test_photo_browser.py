@@ -340,7 +340,7 @@ class PhotoTests(unittest.TestCase):
             return "2026-09-11T13:34:02"
         self.extractor.side_effect = extract
         first = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
-        self.assertEqual(first, {"ok": True, "dateTaken": "2026-09-11T13:34:02", "downloadedBytes": photo.HEADER_BYTES})
+        self.assertEqual(first, {"ok": True, "dateTaken": "2026-09-11T13:34:02", "dateState": "known", "downloadedBytes": photo.HEADER_BYTES})
         second = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
         self.assertEqual(second["downloadedBytes"], 0)
         self.assertEqual(second["dateTaken"], first["dateTaken"])
@@ -354,11 +354,12 @@ class PhotoTests(unittest.TestCase):
         self.extractor.side_effect = lambda source: "2026-09-11T13:34:02" if source.stat().st_size == size else None
         first = self.browser.date_taken("Portfolio/photo.jpg", '"abc"', size)
         self.assertIsNone(first["dateTaken"])
+        self.assertEqual(first["dateState"], "needsOriginal")
         self.assertEqual(self.browser.date_taken("Portfolio/photo.jpg", '"abc"', size)["downloadedBytes"], 0)
         self.assertEqual(len(self.reader.gets), 1)
         self.cache(self.reader.data)
         upgraded = self.browser.date_taken("Portfolio/photo.jpg", '"abc"', size, cache_only=True)
-        self.assertEqual(upgraded, {"ok": True, "dateTaken": "2026-09-11T13:34:02", "downloadedBytes": 0})
+        self.assertEqual(upgraded, {"ok": True, "dateTaken": "2026-09-11T13:34:02", "dateState": "known", "downloadedBytes": 0})
         self.assertEqual(self.extractor.call_count, 2)
         self.assertEqual(len(self.reader.gets), 1)
 
@@ -367,7 +368,7 @@ class PhotoTests(unittest.TestCase):
             key = "Portfolio/photo." + extension
             with self.subTest(extension=extension):
                 result = self.browser.date_taken(key, '"abc"', len(self.reader.data))
-                self.assertEqual(result, {"ok": True, "dateTaken": None, "downloadedBytes": 0})
+                self.assertEqual(result, {"ok": True, "dateTaken": None, "dateState": "needsOriginal", "downloadedBytes": 0})
                 self.cache(self.reader.data, key=key)
                 self.extractor.return_value = "2026-09-11T13:34:02"
                 result = self.browser.date_taken(key, '"abc"', len(self.reader.data))
@@ -378,7 +379,7 @@ class PhotoTests(unittest.TestCase):
     def test_date_cache_only_does_not_poison_later_header_request(self):
         self.reader.data = b"\xff\xd8small-jpeg\xff\xd9"
         first = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data), cache_only=True)
-        self.assertEqual(first, {"ok": True, "dateTaken": None, "downloadedBytes": 0})
+        self.assertEqual(first, {"ok": True, "dateTaken": None, "dateState": "notChecked", "downloadedBytes": 0})
         self.assertEqual(self.reader.gets, [])
         self.extractor.assert_not_called()
         second = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
@@ -428,6 +429,7 @@ class PhotoTests(unittest.TestCase):
         target.write_bytes(b"old-thumbnail")
         first = self.browser.thumbnail(key, etag, size)
         self.assertIsNone(first["dateTaken"])
+        self.assertEqual(first["dateState"], "notChecked")
         self.assertEqual(self.reader.gets, [])
         self.extractor.assert_not_called()
         self.cache(self.reader.data, blocks=[{"Pos": 0, "Size": 2}])
@@ -498,7 +500,7 @@ class PhotoTests(unittest.TestCase):
                     self.browser.date_taken("photo.jpg", '"abc"', 200000)
                 self.extractor.assert_not_called()
 
-    def test_malformed_helper_metadata_is_unknown_and_never_exposed(self):
+    def test_malformed_helper_metadata_is_retryable_and_never_exposed(self):
         helper = self.paths.home / "app/Contents/Helpers/Mountain Turtle Photo Dates"
         helper.parent.mkdir(parents=True)
         helper.write_bytes(b"test-helper")
@@ -510,6 +512,7 @@ class PhotoTests(unittest.TestCase):
             with self.subTest(response=response[:50]), patch.object(photo, "run_process", return_value=response) as run:
                 result = browser.date_taken(f"photo-{number}.jpg", '"abc"', len(self.reader.data))
                 self.assertEqual(result["dateTaken"], None)
+                self.assertEqual(result["dateState"], "error")
                 self.assertNotIn("error", result)
                 self.assertEqual(run.call_args.kwargs["timeout"], photo.DATE_HELPER_TIMEOUT)
                 self.assertEqual(run.call_args.args[0][0], str(helper))
@@ -521,6 +524,7 @@ class PhotoTests(unittest.TestCase):
             key = f"photo-{number}.jpg"
             result = self.browser.date_taken(key, '"abc"', len(self.reader.data))
             self.assertIsNone(result["dateTaken"])
+            self.assertEqual(result["dateState"], "error")
             self.assertNotIn("error", result)
             self.assertIsNone(self.browser.date_record(self.browser.identity(key, '"abc"', len(self.reader.data))))
         self.extractor.side_effect = None
@@ -536,6 +540,7 @@ class PhotoTests(unittest.TestCase):
         with patch.object(photo, "run_process") as run:
             result = browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
         self.assertIsNone(result["dateTaken"])
+        self.assertEqual(result["dateState"], "error")
         self.assertIsNone(browser.date_record(browser.identity("photo.jpg", '"abc"', len(self.reader.data))))
         run.assert_not_called()
 
@@ -544,9 +549,110 @@ class PhotoTests(unittest.TestCase):
         first = self.browser.date_taken("Portfolio/photo.jpg", '"abc"', len(self.reader.data))
         second = self.browser.date_taken("Portfolio/photo.jpg", '"abc"', len(self.reader.data))
         self.assertIsNone(first["dateTaken"])
+        self.assertEqual(first["dateState"], "noCameraDate")
         self.assertEqual(first, second)
         self.extractor.assert_called_once()
         self.assertEqual(self.reader.gets, [])
+
+    def test_unreadable_prefix_needs_original_but_unreadable_original_is_retryable(self):
+        self.reader.data = b"x" * (photo.HEADER_BYTES + 1)
+        self.extractor.side_effect = photo.MetadataUnreadable("could not inspect image")
+        key, etag, size = "Portfolio/photo.jpg", '"abc"', len(self.reader.data)
+        self.assertEqual(self.browser.date_taken(key, etag, size)["dateState"], "needsOriginal")
+        self.assertEqual(len(self.reader.gets), 1)
+        self.cache(self.reader.data)
+        self.assertEqual(self.browser.date_taken(key, etag, size, cache_only=True)["dateState"], "error")
+        self.assertEqual(self.browser.date_taken(key, etag, size, cache_only=True)["dateState"], "error")
+        self.assertEqual(self.extractor.call_count, 3, "Failures must remain retryable")
+        self.extractor.side_effect = None
+        self.assertEqual(self.browser.date_taken(key, etag, size, cache_only=True)["dateState"], "noCameraDate")
+        self.assertEqual(len(self.reader.gets), 1, "Having a complete local file must never trigger a remote read")
+
+    def test_small_jpeg_without_date_is_complete_and_not_needs_original(self):
+        result = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
+        self.assertEqual(result["dateState"], "noCameraDate")
+        self.assertEqual(result["downloadedBytes"], len(self.reader.data))
+        self.assertEqual(self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))["dateState"], "noCameraDate")
+        self.extractor.assert_called_once()
+
+    def test_thumbnail_and_open_original_preserve_date_read_states(self):
+        result = self.browser.thumbnail("photo.png", '"abc"', len(self.reader.data), cache_only=True)
+        self.assertEqual(result["dateState"], "notChecked")
+        result = self.browser.thumbnail("photo.png", '"abc"', len(self.reader.data))
+        self.assertEqual(result["dateState"], "needsOriginal")
+        self.assertEqual(self.reader.gets, [])
+        self.extractor.side_effect = photo.BrowserError("private helper output")
+        result = self.browser.open_original("photo.png", '"abc"', len(self.reader.data))
+        self.assertEqual(result["dateState"], "error")
+        self.assertTrue(Path(result["originalPath"]).is_file(), "A metadata failure must not prevent opening a photo")
+        self.extractor.side_effect = None
+        result = self.browser.open_original("photo.png", '"abc"', len(self.reader.data))
+        self.assertEqual(result["dateState"], "noCameraDate")
+        result = self.browser.thumbnail("photo.png", '"abc"', len(self.reader.data), cache_only=True)
+        self.assertEqual(result["dateState"], "noCameraDate")
+        result = self.browser.thumbnail("photo.png", '"abc"', len(self.reader.data), cache_only=True)
+        self.assertEqual(result["dateState"], "noCameraDate")
+        self.assertEqual(result["source"], "thumbnail-cache")
+
+    def test_legacy_incomplete_negative_needs_original_and_upgrades_locally(self):
+        key, etag, size = "Portfolio/photo.jpg", '"abc"', len(self.reader.data)
+        digest = self.browser.identity(key, etag, size)
+        self.browser.save_artifact(self.browser.artifacts / (digest + ".date-taken"),
+                                   {"version": 1, "dateTaken": None, "complete": False})
+        self.assertEqual(self.browser.date_taken(key, etag, size)["dateState"], "needsOriginal")
+        self.assertEqual(self.reader.gets, [])
+        self.extractor.assert_not_called()
+        self.cache(self.reader.data)
+        self.assertEqual(self.browser.date_taken(key, etag, size, cache_only=True)["dateState"], "noCameraDate")
+        self.assertEqual(self.browser.date_record(digest)["version"], 2)
+
+    def test_legacy_complete_negative_is_rechecked_before_claiming_missing_date(self):
+        key, etag, size = "Portfolio/photo.jpg", '"abc"', len(self.reader.data)
+        digest = self.browser.identity(key, etag, size)
+        self.browser.save_artifact(self.browser.artifacts / (digest + ".date-taken"),
+                                   {"version": 1, "dateTaken": None, "complete": True})
+        self.assertEqual(self.browser.date_taken(key, etag, size, cache_only=True)["dateState"], "notChecked")
+        self.cache(self.reader.data)
+        self.extractor.side_effect = photo.MetadataUnreadable("could not inspect image")
+        self.assertEqual(self.browser.date_taken(key, etag, size)["dateState"], "error")
+        self.assertIsNone(self.browser.date_record(digest))
+        self.assertEqual(self.reader.gets, [])
+
+    def test_legacy_positive_date_is_reused_without_remote_read(self):
+        key, etag, size = "photo.jpg", '"abc"', len(self.reader.data)
+        digest = self.browser.identity(key, etag, size)
+        self.browser.save_artifact(self.browser.artifacts / (digest + ".date-taken"),
+                                   {"version": 1, "dateTaken": "2026-09-11T13:34:02", "complete": False})
+        self.assertEqual(self.browser.date_taken(key, etag, size),
+                         {"ok": True, "dateTaken": "2026-09-11T13:34:02", "dateState": "known", "downloadedBytes": 0})
+        self.assertEqual(self.reader.gets, [])
+        self.extractor.assert_not_called()
+
+    def test_durable_offline_original_is_read_without_network_even_after_preview_eviction(self):
+        import offline_photos
+        source = self.paths.home / "offline-photo.jpg"
+        source.write_bytes(self.reader.data)
+        self.extractor.return_value = "2026-09-11T13:34:02"
+        with patch.object(offline_photos, "offline_original", return_value=source) as lookup:
+            result = self.browser.date_taken("photo.jpg", '"abc"', len(self.reader.data), cache_only=True)
+        self.assertEqual(result["dateState"], "known")
+        self.assertEqual(result["downloadedBytes"], 0)
+        self.assertEqual(self.reader.gets, [])
+        self.extractor.assert_called_once_with(source)
+        lookup.assert_called_once_with(self.connection, self.paths, "photo.jpg", '"abc"', len(self.reader.data))
+
+    def test_helper_readability_flag_is_validated_and_unreadable_is_not_cached_missing(self):
+        helper = self.paths.home / "app/Contents/Helpers/Mountain Turtle Photo Dates"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"test-helper")
+        self.paths.resources = helper.parent.parent / "Resources"
+        browser = photo.PhotoBrowser(self.connection, self.paths, self.reader, self.renderer)
+        for readable in (False, "false", 0, None):
+            with self.subTest(readable=readable), patch.object(photo, "run_process", return_value=json.dumps(
+                    {"dateTaken": None, "metadataReadable": readable}).encode()):
+                result = browser.date_taken("photo.jpg", '"abc"', len(self.reader.data))
+                self.assertEqual(result["dateState"], "error")
+                self.assertIsNone(browser.date_record(browser.identity("photo.jpg", '"abc"', len(self.reader.data))))
 
     def test_symlink_date_cache_is_rejected_without_touching_target(self):
         outside = self.paths.home / "private.json"

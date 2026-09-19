@@ -246,11 +246,33 @@ associate this permission with the app.
 
 Mountain Turtle's **Browse photos** view shows **Date taken** from the camera's
 embedded metadata. Use **Sort this page** to order the current page by name or
-capture date; missing dates appear as **Unknown**. Dates use the camera's
+capture date. Missing dates explain what is known: **Not checked**,
+**Needs original**, **No camera date**, or **Couldn't read—retry**. Dates use the camera's
 recorded local time. Reading dates can fetch small JPEG headers, but never a
 full large original or an entire folder in the background. Other formats can
 show their date once the original is available locally. See the
 [photo browser guide](docs/PHOTO_BROWSER.md#date-taken-and-sorting) for details.
+
+## Keep photos offline
+
+In **Browse photos**, select individual photos or **Select page**, then choose
+**Keep offline**. The download queue shows progress and lets you pause, resume,
+retry, and open saved photos. Closing the photo window does not cancel downloads.
+Paused downloads remain paused until you resume them.
+
+Offline originals live in a private folder under
+`~/Library/Application Support/Mountain Turtle/offline-photos/`, separate from
+the temporary drive and preview caches. Mountain Turtle never evicts these
+originals during cache cleanup. Use the queue's **Reveal** action to find them.
+They remain until you remove them yourself; protect this folder with your normal
+Mac backups. Opening these originals does not depend on the mounted drive.
+
+**Verified** means the downloaded bytes matched S3's supported full-object
+checksum and the saved file passed a local SHA-256 reread. When S3 cannot supply
+a supported checksum, the queue says **Downloaded**, explains that limitation,
+and retains a local SHA-256 for later checks. Neither byte count nor a green
+cache badge alone means a transfer is verified. A changed cloud version or
+modified local copy stops that item's download; existing files are preserved.
 
 ## Finder file badges
 

@@ -88,7 +88,7 @@ installation. Ed25519 update authentication does not replace Apple notarization.
 5. Publish the reviewed assets (use `--preview` only for a prepared preview):
 
    ```sh
-   ./scripts/publish-release.sh --preview "build/releases/v$(cat VERSION)"
+   ./scripts/publish-release.sh "build/releases/v$(cat VERSION)"
    ```
 
    Publication requires the clean prepared commit and exact already-pushed tag.
@@ -98,6 +98,19 @@ installation. Ed25519 update authentication does not replace Apple notarization.
    release; it never uses `--clobber` or moves a tag. If interrupted after creating
    a draft, inspect its assets before explicitly recovering it. A published
    release needs a new version for corrections.
+
+   After publication, the script downloads the public `/latest` feed and each
+   versioned asset and compares them with the prepared files. This catches a
+   release that exists on GitHub but is not actually served to installed apps.
+   If GitHub is still propagating the assets, rerun only the delivery check:
+
+   ```sh
+   python3 -B scripts/verify-published-release.py "build/releases/v$(cat VERSION)" --attempts 6
+   ```
+
+   The delivery check is read-only. It does not recreate the release or replace
+   an asset. A successful delivery check still needs an actual update/relaunch
+   test on a Mac running an older version.
 
 Preview releases have **Preview** in their title and an explicit notarization
 notice. They are ordinary GitHub Releases, rather than GitHub *prereleases*,

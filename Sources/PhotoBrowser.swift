@@ -30,7 +30,7 @@ private actor ThumbnailSlots {
 }
 
 enum PhotoClient {
-    static func run<T: Decodable>(_ args: [String], as type: T.Type) async throws -> T {
+    static func run<T: Decodable>(_ args: [String], as type: T.Type, script: String = "photo_browser.py") async throws -> T {
         let handle = PhotoProcess()
         let data: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -39,7 +39,7 @@ enum PhotoClient {
                         guard let python = ServiceClient.pythonPath else { throw TurtleError(message: "Python is unavailable.") }
                         let process = Process(), output = Pipe()
                         process.executableURL = URL(fileURLWithPath: python)
-                        process.arguments = [ServiceClient.resources.appendingPathComponent("service/photo_browser.py").path,
+                        process.arguments = ["-B", ServiceClient.resources.appendingPathComponent("service/\(script)").path,
                                              "--resource-dir", ServiceClient.resources.path] + args
                         process.standardOutput = output
                         process.standardError = FileHandle.nullDevice
@@ -79,16 +79,19 @@ struct PhotoPreview: Decodable {
     var needsOriginal: Bool?
     var message: String?
     var dateTaken: String?
+    var dateState: String?
 }
 struct OriginalPhoto: Decodable {
     var originalPath: String
     var dateTaken: String?
+    var dateState: String?
 }
 
-private struct PhotoDateResponse: Decodable { var dateTaken: String? }
+private struct PhotoDateResponse: Decodable { var dateTaken: String?; var dateState: String? }
+private struct OfflineOpenResponse: Decodable { let path: String }
 private struct PhotoDateResult: Sendable {
     let identity: PhotoIdentity
-    let date: PhotoTakenDate?
+    let date: PhotoTakenDate
 }
 
 private enum PhotoDates {
@@ -98,9 +101,9 @@ private enum PhotoDates {
             defer { Task { await ThumbnailSlots.shared.release() } }
             let result = try await PhotoClient.run(["date-taken", connectionID] + photo.arguments, as: PhotoDateResponse.self)
             try Task.checkCancellation()
-            return PhotoDateResult(identity: photo.identity, date: PhotoTakenDate(result.dateTaken))
+            return PhotoDateResult(identity: photo.identity, date: PhotoTakenDate(result.dateTaken, state: result.dateState))
         } catch {
-            return PhotoDateResult(identity: photo.identity, date: nil)
+            return PhotoDateResult(identity: photo.identity, date: PhotoTakenDate(nil, state: "error"))
         }
     }
 }
@@ -139,6 +142,12 @@ struct PhotoBrowserView: View {
     @State private var dateRequestID = UUID()
     @State private var readingDates = false
     @State private var dateFailures = 0
+    @State private var selected: Set<PhotoIdentity> = []
+    @State private var offlineQueue: OfflinePhotoQueue?
+    @State private var offlineFailure: String?
+    @State private var offlineBusy = false
+    @State private var showQueue = false
+    @State private var refreshedOffline: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -159,7 +168,7 @@ struct PhotoBrowserView: View {
                 Spacer()
                 Button { requestID = UUID() } label: { Image(systemName: "arrow.clockwise") }.help("Reload this page")
             }.padding(.horizontal, 20).padding(.bottom, 14)
-            Text("Only visible tiles request previews. Missing previews stay online until you choose to create one or open the original.")
+            Text("Previews are temporary. Keep offline saves originals on this Mac, outside the cache, until you delete them.")
                 .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 12)
             HStack(spacing: 10) {
                 Picker("Sort this page", selection: $sort) {
@@ -171,12 +180,23 @@ struct PhotoBrowserView: View {
                     Text("Reading dates on this page…")
                 } else if dateFailures > 0 {
                     Text("\(dateFailures) dates could not be read.")
-                    Button("Retry dates") { sortPage() }
+                    Button("Retry dates") { sortPage(forceRead: true) }
                 } else {
-                    Text("Camera dates; missing dates are Unknown.")
+                    Text("Camera dates; unchecked and missing dates appear last.")
                 }
                 Spacer(minLength: 0)
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 12)
+            HStack(spacing: 10) {
+                Button("Select page") { selected = Set(page?.photos.map(\.identity) ?? []) }
+                    .disabled(page?.photos.isEmpty != false || loading)
+                    .keyboardShortcut("a", modifiers: .command)
+                Button("Clear") { selected = [] }.disabled(selected.isEmpty)
+                Text("\(selected.count) selected").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { keepOffline(page?.photos.filter { selected.contains($0.identity) } ?? []) } label: {
+                    Label("Keep offline", systemImage: "arrow.down.circle")
+                }.disabled(selected.isEmpty || offlineBusy)
+            }.padding(.horizontal, 20).padding(.bottom, 12)
             Divider()
             if let failure {
                 VStack(alignment: .leading, spacing: 10) {
@@ -192,9 +212,12 @@ struct PhotoBrowserView: View {
                 Spacer()
             }
             Divider()
+            offlinePanel
+            Divider()
             footer.padding(16)
-        }.frame(width: 860, height: 660).tint(moss)
+        }.frame(width: 920, height: 760).tint(moss)
             .task(id: requestID) { await loadPage() }
+            .task { await observeOfflineQueue() }
             .onChange(of: sort) { _, _ in sortPage() }
             .onDisappear { cancelPageRequests() }
     }
@@ -216,8 +239,12 @@ struct PhotoBrowserView: View {
                         PhotoTile(connectionID: connection.id, photo: photo, visible: previews && visible.contains(photo.key),
                                   originalRefresh: originalRefreshes[photo.key], opening: opening == photo.key,
                                   dateTaken: dates[photo.identity] ?? PhotoTakenDate(nil),
+                                  selected: selected.contains(photo.identity), offlineItem: offlineQueue?.item(for: photo),
+                                  toggleSelection: { if !selected.insert(photo.identity).inserted { selected.remove(photo.identity) } },
                                   receivedDate: { value in recordDate(value, for: photo, generation: generation) },
-                                  openOriginal: { open(photo, reveal: false) }, downloadOriginal: { open(photo, reveal: true) })
+                                  checkDate: { checkDate(photo) },
+                                  openOriginal: { openPhoto(photo) }, keepOffline: { keepOffline([photo]) },
+                                  revealOffline: { if let item = offlineQueue?.item(for: photo) { openOffline(item, reveal: true) } })
                             .background(GeometryReader { geometry in
                                 Color.clear.preference(key: PhotoFrames.self, value: [photo.key: geometry.frame(in: .named("photoViewport"))])
                             })
@@ -265,6 +292,165 @@ struct PhotoBrowserView: View {
         let parts = prefix.split(separator: "/").dropLast()
         return parts.isEmpty ? "" : parts.joined(separator: "/") + "/"
     }
+
+    private var offlinePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button { showQueue.toggle() } label: {
+                    Label(offlineQueue?.summary ?? "Offline downloads", systemImage: showQueue ? "chevron.down" : "chevron.right")
+                }.buttonStyle(.plain).font(.callout.weight(.medium))
+                Spacer()
+                if offlineBusy { ProgressView().controlSize(.small) }
+                if let queue = offlineQueue, queue.pendingCount > 0 {
+                    if queue.paused {
+                        Button("Resume") { offlineAction("resume") }.disabled(offlineBusy)
+                    } else if queue.workerRunning {
+                        Button("Pause") { offlineAction("pause") }.disabled(offlineBusy)
+                    } else {
+                        Button("Resume downloads") { offlineAction("resume") }.disabled(offlineBusy)
+                    }
+                }
+            }
+            if let offlineFailure {
+                HStack {
+                    Label(offlineFailure, systemImage: "exclamationmark.circle").foregroundStyle(.orange).lineLimit(2)
+                    Button("Retry status") { Task { await refreshOfflineQueue() } }
+                }.font(.caption)
+            }
+            if showQueue {
+                Text("Downloads continue when this window closes. Offline copies stay outside the temporary cache.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let queue = offlineQueue, !queue.items.isEmpty {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(queue.items) { item in offlineRow(item) }
+                        }.padding(.vertical, 4)
+                    }.frame(height: min(170, CGFloat(queue.items.count) * 70))
+                } else {
+                    Text("Select photos, then choose Keep offline.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }.padding(.horizontal, 20).padding(.vertical, 12)
+    }
+
+    private func offlineRow(_ item: OfflinePhotoItem) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: item.isVerified ? "checkmark.shield.fill" : (item.hasOfflineCopy ? "internaldrive" : "arrow.down.circle"))
+                .foregroundStyle(item.isVerified ? moss : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name).font(.callout).lineLimit(1).truncationMode(.middle)
+                if item.isPending {
+                    ProgressView(value: item.progress).frame(maxWidth: 420)
+                    Text("\(offlineQueue?.paused == true ? (offlineQueue?.workerRunning == true ? "Pausing…" : "Paused") : item.stateLabel) · \(item.progressLabel)")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(item.error ?? item.stateLabel).font(.caption)
+                        .foregroundStyle(item.state == "error" ? .orange : .secondary).lineLimit(2)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if item.state == "error" {
+                Button("Retry") { offlineAction("retry", item: item) }.disabled(offlineBusy)
+            }
+            if item.hasOfflineCopy {
+                Button("Open") { openOffline(item, reveal: false) }.disabled(offlineBusy)
+                Button { openOffline(item, reveal: true) } label: { Image(systemName: "folder") }
+                    .help("Show offline copy in Finder").accessibilityLabel("Show \(item.name) in Finder")
+                    .disabled(offlineBusy)
+            }
+            if item.sha256 != nil && (item.hasOfflineCopy || item.state == "error") {
+                Button { offlineAction("verify", item: item) } label: {
+                    if item.state == "error" { Text("Check copy") }
+                    else { Image(systemName: "checkmark.shield") }
+                }
+                    .help("Check that the local copy still matches its saved checksum. This does not add a missing cloud checksum.")
+                    .accessibilityLabel("Check local copy of \(item.name)").disabled(offlineBusy)
+            }
+        }.help(item.state == "downloaded" ? "This original is retained offline. The cloud supplied no supported checksum, so end-to-end verification is unavailable." : (item.error ?? item.stateLabel))
+    }
+
+    private func observeOfflineQueue() async {
+        while !Task.isCancelled {
+            if !offlineBusy { await refreshOfflineQueue() }
+            do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
+        }
+    }
+
+    private func refreshOfflineQueue() async {
+        do {
+            let queue = try await PhotoClient.run(["status", connection.id], as: OfflinePhotoQueue.self, script: "offline_photos.py")
+            try Task.checkCancellation()
+            guard !offlineBusy else { return }
+            applyOfflineQueue(queue)
+            offlineFailure = nil
+        } catch {
+            if !Task.isCancelled && !offlineBusy { offlineFailure = error.localizedDescription }
+        }
+    }
+
+    private func applyOfflineQueue(_ queue: OfflinePhotoQueue) {
+        if offlineQueue == nil && !queue.items.isEmpty { showQueue = true }
+        offlineQueue = queue
+        for item in queue.items where item.hasOfflineCopy && !refreshedOffline.contains(item.id) {
+            guard let photo = page?.photos.first(where: { $0.identity == item.identity }) else { continue }
+            refreshedOffline.insert(item.id)
+            originalRefreshes[photo.key] = UUID()
+            checkDate(photo)
+        }
+    }
+
+    private func keepOffline(_ photos: [PhotoItem]) {
+        guard !photos.isEmpty, !offlineBusy else { return }
+        do {
+            let items: [[String: Any]] = photos.map { ["key": $0.key, "etag": $0.etag, "size": $0.size] }
+            let data = try JSONSerialization.data(withJSONObject: items)
+            offlineAction("enqueue", extra: ["--items-json", String(decoding: data, as: UTF8.self)])
+            showQueue = true
+        } catch { offlineFailure = error.localizedDescription }
+    }
+
+    private func offlineAction(_ action: String, item: OfflinePhotoItem? = nil, extra: [String] = []) {
+        guard !offlineBusy else { return }
+        offlineBusy = true; offlineFailure = nil
+        var args = [action, connection.id] + extra
+        if let item { args += ["--item-id", item.id] }
+        Task {
+            defer { offlineBusy = false }
+            do {
+                let result = try await PhotoClient.run(args, as: OfflinePhotoQueue.self, script: "offline_photos.py")
+                applyOfflineQueue(result)
+                if action == "enqueue" { selected = [] }
+            } catch { offlineFailure = error.localizedDescription }
+        }
+    }
+
+    private func openPhoto(_ photo: PhotoItem) {
+        if let item = offlineQueue?.item(for: photo), item.hasOfflineCopy { openOffline(item, reveal: false) }
+        else { open(photo, reveal: false) }
+    }
+
+    private func openOffline(_ item: OfflinePhotoItem, reveal: Bool) {
+        guard !offlineBusy else { return }
+        offlineBusy = true; offlineFailure = nil
+        Task {
+            defer { offlineBusy = false }
+            do {
+                let result = try await PhotoClient.run(["open", connection.id, "--item-id", item.id], as: OfflineOpenResponse.self, script: "offline_photos.py")
+                let url = URL(fileURLWithPath: result.path)
+                if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                else { NSWorkspace.shared.open(url) }
+            } catch { offlineFailure = error.localizedDescription }
+        }
+    }
+
+    private func checkDate(_ photo: PhotoItem) {
+        let generation = requestID
+        Task {
+            let result = await PhotoDates.read(photo, connectionID: connection.id)
+            guard generation == requestID else { return }
+            recordDate(result.date, for: photo, generation: generation)
+            dateFailures = dates.values.filter { $0.state == .error }.count
+        }
+    }
     private func navigate(to next: String) {
         prefix = next; cursor = nil; history = []; visible = []; requestID = UUID()
     }
@@ -275,7 +461,7 @@ struct PhotoBrowserView: View {
     private func loadPage() async {
         let generation = requestID
         cancelPageRequests()
-        loading = true; failure = nil; visible = []; originalRefreshes = [:]
+        loading = true; failure = nil; visible = []; originalRefreshes = [:]; selected = []
         dates = [:]; orderedPhotos = []; dateFailures = 0; originalMessage = nil
         do {
             var args = ["list", connection.id, "--prefix=\(prefix)", "--limit", "100"]
@@ -293,26 +479,27 @@ struct PhotoBrowserView: View {
         }
     }
 
-    private func recordDate(_ value: String?, for photo: PhotoItem, generation: UUID) {
+    private func recordDate(_ value: PhotoTakenDate, for photo: PhotoItem, generation: UUID) {
         guard generation == requestID, page?.photos.contains(where: { $0.identity == photo.identity }) == true else { return }
-        let date = PhotoTakenDate(value)
+        let date = value.preservingMoreComplete(dates[photo.identity])
         // A cached preview without a date must not overwrite a date obtained
         // later from the explicitly downloaded original.
         guard date.value != nil || dates[photo.identity]?.value == nil else { return }
         let changed = dates[photo.identity]?.value != date.value
         dates[photo.identity] = date
+        dateFailures = dates.values.filter { $0.state == .error }.count
         if changed && !readingDates && sort != .name, let page {
             orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: sort, dates: dates)
         }
     }
 
-    private func sortPage() {
+    private func sortPage(forceRead: Bool = false) {
         dateTask?.cancel()
         let generation = UUID()
         dateRequestID = generation
         readingDates = false; dateFailures = 0
         guard let page, !loading else { return }
-        guard sort != .name else {
+        guard sort != .name || forceRead else {
             orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: .name, dates: dates)
             return
         }
@@ -320,7 +507,7 @@ struct PhotoBrowserView: View {
         let choice = sort
         let connectionID = connection.id
         // Only the listed page participates. Known camera dates need no request;
-        // an Unknown preview can still gain a date from a local original.
+        // an incomplete preview can still gain a date from a local original.
         let pending = page.photos.filter { dates[$0.identity]?.value == nil }
         guard !pending.isEmpty else {
             orderedPhotos = PhotoDateOrdering.sorted(page.photos, by: choice, dates: dates)
@@ -347,11 +534,8 @@ struct PhotoBrowserView: View {
             }
             guard !Task.isCancelled, pageGeneration == requestID, generation == dateRequestID else { return }
             for result in results {
-                if let date = result.date {
-                    if date.value != nil || dates[result.identity]?.value == nil { dates[result.identity] = date }
-                } else {
-                    dateFailures += 1
-                }
+                dates[result.identity] = result.date.preservingMoreComplete(dates[result.identity])
+                if result.date.state == .error { dateFailures += 1 }
             }
             // Publish one ordered page after the batch, keeping tile order
             // stable while previews and date requests complete out of order.
@@ -372,7 +556,7 @@ struct PhotoBrowserView: View {
                 try Task.checkCancellation()
                 guard generation == requestID, originalGeneration == originalRequestID else { return }
                 let url = URL(fileURLWithPath: result.originalPath)
-                recordDate(result.dateTaken, for: photo, generation: generation)
+                recordDate(PhotoTakenDate(result.dateTaken, state: result.dateState), for: photo, generation: generation)
                 originalRefreshes[photo.key] = UUID()
                 originalMessage = "Saved \(photo.name) in Downloads / Mountain Turtle."
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -396,9 +580,14 @@ private struct PhotoTile: View {
     let originalRefresh: UUID?
     let opening: Bool
     let dateTaken: PhotoTakenDate
-    let receivedDate: (String?) -> Void
+    let selected: Bool
+    let offlineItem: OfflinePhotoItem?
+    let toggleSelection: () -> Void
+    let receivedDate: (PhotoTakenDate) -> Void
+    let checkDate: () -> Void
     let openOriginal: () -> Void
-    let downloadOriginal: () -> Void
+    let keepOffline: () -> Void
+    let revealOffline: () -> Void
     @State private var image: NSImage?
     @State private var loading = false
     @State private var message = "Online only"
@@ -416,25 +605,41 @@ private struct PhotoTile: View {
                 } else {
                     Image(systemName: "photo").font(.system(size: 34)).foregroundStyle(moss.opacity(0.4)).frame(maxWidth: .infinity).frame(height: 110)
                 }
-                Image(systemName: image == nil ? "cloud.fill" : "checkmark.circle.fill")
-                    .symbolRenderingMode(.palette).foregroundStyle(image == nil ? Color.gray : moss, Color.white).padding(5)
+                Image(systemName: offlineItem?.isVerified == true ? "checkmark.shield.fill" : (offlineItem?.hasOfflineCopy == true ? "internaldrive.fill" : "cloud.fill"))
+                    .foregroundStyle(offlineItem?.isVerified == true ? moss : .secondary).padding(5)
                 if loading || opening { ProgressView().controlSize(.small).frame(maxWidth: .infinity).frame(height: 110) }
             }.contentShape(Rectangle()).onTapGesture(count: 2, perform: openOriginal)
+                .overlay(alignment: .topLeading) {
+                    Toggle(isOn: Binding(get: { selected }, set: { _ in toggleSelection() })) { Text("Select \(photo.name)") }
+                        .labelsHidden().toggleStyle(.checkbox).padding(7)
+                        .accessibilityLabel("Select \(photo.name)")
+                }
+                .overlay { RoundedRectangle(cornerRadius: 10).stroke(selected ? moss : Color.clear, lineWidth: 2).allowsHitTesting(false) }
             Text(photo.name).font(.callout).lineLimit(1).truncationMode(.middle)
             Text(dateTaken.label).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                 .frame(minHeight: 26)
-                .help("\(dateTaken.label)\nThe camera's recorded date and time. Unknown means no camera date is available.")
-            Text(image == nil ? (needsOriginal ? "Preview not available" : message) : "Small preview cached")
+                .help(dateTaken.explanation)
+            if dateTaken.state == .error || dateTaken.state == .notChecked {
+                Button(dateTaken.state == .error ? "Retry date" : "Check date", action: checkDate)
+                    .buttonStyle(.link).font(.system(size: 10))
+            }
+            Text(image == nil ? (needsOriginal ? "Preview not available" : message) : "Cached preview · May be removed")
                 .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+            if let offlineItem {
+                Text(offlineItem.stateLabel).font(.system(size: 10)).lineLimit(1)
+                    .foregroundStyle(offlineItem.isVerified ? moss : .secondary)
+            }
         }
-        .accessibilityRepresentation {
-            Button("\(photo.name), \(dateTaken.label), \(image == nil ? message : "small preview cached")", action: openOriginal)
-                .accessibilityAction(named: Text("Download original"), downloadOriginal)
-        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(photo.name), \(dateTaken.label), \(offlineItem?.stateLabel ?? "Online original")")
+        .accessibilityAction(named: Text("Open original"), openOriginal)
+        .accessibilityAction(named: Text("Keep offline"), keepOffline)
         .help("\(photo.name) · \(ByteCountFormatter.string(fromByteCount: photo.size, countStyle: .file))\n\(dateTaken.label)\n\(message)\nDouble-click to download and open the original.")
         .contextMenu {
-            Button("Open original", action: openOriginal)
-            Button("Download original", action: downloadOriginal)
+            Button(offlineItem?.hasOfflineCopy == true ? "Open offline copy" : "Open original", action: openOriginal)
+            Button("Keep offline", action: keepOffline)
+            if offlineItem?.hasOfflineCopy == true { Button("Show offline copy", action: revealOffline) }
+            Button(dateTaken.state == .error ? "Retry date" : "Check date", action: checkDate)
             if image == nil {
                 Divider()
                 Button("Create preview (downloads original)") {
@@ -469,11 +674,16 @@ private struct PhotoTile: View {
             let result = try await PhotoClient.run(args, as: PhotoPreview.self)
             try Task.checkCancellation()
             guard loadID == generation else { return }
-            receivedDate(result.dateTaken)
+            receivedDate(PhotoTakenDate(result.dateTaken, state: result.dateState))
             if let path = result.thumbnailPath { image = NSImage(contentsOfFile: path) }
             needsOriginal = result.needsOriginal ?? false
             message = result.message ?? (image == nil ? "Online only" : "Small preview cached")
-        } catch { if !Task.isCancelled && loadID == generation { message = error.localizedDescription } }
+        } catch {
+            if !Task.isCancelled && loadID == generation {
+                message = error.localizedDescription
+                receivedDate(PhotoTakenDate(nil, state: "error"))
+            }
+        }
         if loadID == generation { loading = false }
     }
 }

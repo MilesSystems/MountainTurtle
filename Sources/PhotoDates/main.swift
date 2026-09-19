@@ -107,11 +107,14 @@ do {
 // DateTimeOriginal is trusted; file dates and digitization dates are unrelated.
 let options = [kCGImageSourceShouldCache: false] as CFDictionary
 var dateTaken: String?
+var metadataReadable = false
 if let source = CGImageSourceCreateWithURL(url as CFURL, options),
-   let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [String: Any],
-   let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
-   let original = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
-    dateTaken = cameraDate(original)
+   let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [String: Any] {
+    metadataReadable = true
+    if let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
+       let original = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
+        dateTaken = cameraDate(original)
+    }
 }
 if dateTaken == nil {
     do {
@@ -122,7 +125,10 @@ if dateTaken == nil {
         fail("Could not read the local photo metadata file.")
     }
 }
-let result: [String: Any] = ["dateTaken": dateTaken as Any? ?? NSNull()]
+// Null on an unreadable image is not evidence of missing EXIF. The caller knows
+// whether this is a full original or a bounded probe and can offer the right next step.
+let result: [String: Any] = ["dateTaken": dateTaken as Any? ?? NSNull(),
+                             "metadataReadable": metadataReadable || dateTaken != nil]
 guard let output = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) else {
     fail("Could not encode the photo metadata result.")
 }

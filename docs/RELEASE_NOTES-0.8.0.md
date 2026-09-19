@@ -1,0 +1,6 @@
+- Select several photos and choose **Keep offline** to retain originals outside the temporary cache.
+- Follow download progress, pause and resume the queue, retry failed items, and open or reveal retained copies.
+- Verify downloads against supported S3 full-object checksums and check saved copies with SHA-256. Downloads without a supported cloud checksum are clearly identified.
+- Missing camera dates now explain their state: **Not checked**, **Needs original**, **No camera date**, or **Couldn't read—retry**.
+- App updates preserve offline queue intent while stopping downloads safely before installation.
+- Release publication verifies the public update feed and downloadable assets after upload. Python helpers no longer create bytecode inside the signed app.

@@ -121,4 +121,5 @@ PY
 # GitHub excludes prereleases from /releases/latest. Preview status is disclosed
 # in title/notes; it remains a normal release to serve the configured update feed.
 gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+"$PYTHON_BIN" -B "$PROJECT_DIR/scripts/verify-published-release.py" "$RELEASE_DIR" --attempts 6
 gh release view "$TAG" --repo "$REPO" --json url --jq .url

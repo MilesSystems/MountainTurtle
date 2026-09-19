@@ -244,7 +244,7 @@ enum ServiceClient {
                 do {
                     guard let python = pythonPath else { throw TurtleError(message: "A working Python 3.9 or newer is needed to run the mount service. See the setup guide.") }
                     process.executableURL = URL(fileURLWithPath: python)
-                    process.arguments = [script.path, "--resource-dir", resources.path] + arguments
+                    process.arguments = ["-B", script.path, "--resource-dir", resources.path] + arguments
                     try process.run()
                     if let input, let standardInput {
                         try input.fileHandleForWriting.write(contentsOf: standardInput)

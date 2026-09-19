@@ -81,7 +81,7 @@ class PhotoDatesHelperTests(unittest.TestCase):
                         str(ROOT / "Sources/PhotoDates/main.swift"), "-o", str(cls.helper)],
                        check=True, capture_output=True, text=True, timeout=120)
 
-    def extract(self, contents, name="photo.jpg", env=None):
+    def extract(self, contents, name="photo.jpg", env=None, include_status=False):
         source = self.directory / name
         source.write_bytes(contents)
         # Distinct local dates must never become the capture date.
@@ -89,7 +89,26 @@ class PhotoDatesHelperTests(unittest.TestCase):
         result = subprocess.run([str(self.helper), str(source)], capture_output=True,
                                 text=True, timeout=10, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
+        response = json.loads(result.stdout)
+        self.assertIsInstance(response["metadataReadable"], bool)
+        return response if include_status else {"dateTaken": response["dateTaken"]}
+
+    def test_readable_photo_without_exif_is_distinct_from_unreadable_input(self):
+        self.assertEqual(self.extract(JPEG, include_status=True),
+                         {"dateTaken": None, "metadataReadable": True})
+        for contents in (b"", b"not an image", JPEG[:4]):
+            with self.subTest(contents=contents):
+                self.assertEqual(self.extract(contents, include_status=True),
+                                 {"dateTaken": None, "metadataReadable": False})
+
+    def test_bounded_prefix_distinguishes_readable_metadata_from_valid_camera_date(self):
+        prefix = prefix_before_image_frame(exif_jpeg(digitized="2026:09:11 13:34:50"))
+        # ImageIO can inspect a partial metadata dictionary on some macOS versions.
+        # The browser must still use its full-file flag before claiming no date.
+        self.assertIsNone(self.extract(prefix, include_status=True)["dateTaken"])
+        dated = prefix_before_image_frame(exif_jpeg("2026:09:11 13:34:50"))
+        self.assertEqual(self.extract(dated, include_status=True),
+                         {"dateTaken": "2026-09-11T13:34:50", "metadataReadable": True})
 
     def test_original_date_in_both_tiff_byte_orders(self):
         for endian in ("<", ">"):
