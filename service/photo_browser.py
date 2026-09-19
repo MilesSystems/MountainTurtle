@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 
 import turtle_service as turtle
 
@@ -302,7 +302,7 @@ class PhotoBrowser:
         if not 1 <= limit <= 200 or (cursor and (len(cursor) > 8192 or "\x00" in cursor)):
             raise BrowserError("Invalid page size or continuation token.")
         result = self.reader.list(prefix, cursor, limit)
-        decode = unquote if result.get("EncodingType") == "url" else lambda value: value
+        decode = unquote_plus if result.get("EncodingType") == "url" else lambda value: value
         folders, photos, hidden = [], [], 0
         for item in result.get("CommonPrefixes", []):
             key = decode(item["Prefix"])

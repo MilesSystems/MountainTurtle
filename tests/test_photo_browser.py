@@ -92,6 +92,39 @@ class PhotoTests(unittest.TestCase):
                 self.browser.list(limit=limit)
         self.assertEqual(self.reader.lists, [])
 
+    def test_url_encoded_spaces_allow_folder_navigation_and_photo_reads(self):
+        self.reader.page = {"CommonPrefixes": [{"Prefix": "Portfolio%2FDogs+FINAL%2F"}],
+                            "EncodingType": "url"}
+        folder = self.browser.list("Portfolio/")["folders"][0]
+        self.assertEqual(folder, {"key": "Portfolio/Dogs FINAL/", "name": "Dogs FINAL"})
+        self.reader.page = {"Contents": [{"Key": "Portfolio%2FDogs+FINAL%2Fa+b.jpg",
+                                          "Size": len(self.reader.data), "ETag": '"abc"'}],
+                            "EncodingType": "url"}
+        image = self.browser.list(folder["key"])["photos"][0]
+        self.assertEqual(self.reader.lists[-1], ("Portfolio/Dogs FINAL/", None, 100))
+        self.assertEqual(image["key"], "Portfolio/Dogs FINAL/a b.jpg")
+        self.assertEqual(image["name"], "a b.jpg")
+        self.browser.thumbnail(image["key"], image["etag"], image["size"])
+        self.assertEqual(self.reader.gets[0][0], "Portfolio/Dogs FINAL/a b.jpg")
+
+    def test_url_encoded_literal_plus_is_preserved_after_one_decode(self):
+        self.reader.page = {"CommonPrefixes": [{"Prefix": "Portfolio%2FDogs%2BFINAL%2F"}],
+                            "Contents": [{"Key": "Portfolio%2Fa%2Bb+%252B.jpg",
+                                          "Size": 99, "ETag": '"abc"'}],
+                            "EncodingType": "url"}
+        result = self.browser.list("Portfolio/")
+        self.assertEqual(result["folders"], [{"key": "Portfolio/Dogs+FINAL/", "name": "Dogs+FINAL"}])
+        self.assertEqual(result["photos"], [{"key": "Portfolio/a+b %2B.jpg", "name": "a+b %2B.jpg",
+                                            "size": 99, "etag": '"abc"'}])
+
+    def test_unencoded_list_preserves_literal_plus_and_percent_sequences(self):
+        self.reader.page = {"CommonPrefixes": [{"Prefix": "Portfolio/Dogs+FINAL/"}],
+                            "Contents": [{"Key": "Portfolio/a+b %2B.jpg", "Size": 99, "ETag": '"abc"'}]}
+        result = self.browser.list("Portfolio/")
+        self.assertEqual(result["folders"], [{"key": "Portfolio/Dogs+FINAL/", "name": "Dogs+FINAL"}])
+        self.assertEqual(result["photos"], [{"key": "Portfolio/a+b %2B.jpg", "name": "a+b %2B.jpg",
+                                            "size": 99, "etag": '"abc"'}])
+
     def test_missing_version_never_reads_remote_or_reuses_cache(self):
         for etag in ("", '""', " "):
             with self.assertRaises(photo.BrowserError):
