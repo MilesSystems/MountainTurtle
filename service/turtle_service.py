@@ -62,11 +62,21 @@ def read_json(path, default):
         return default
 
 
-def write_json(path, value):
+def write_json(path, value, durable=False):
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    with temporary.open("w") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        if durable:
+            handle.flush()
+            os.fsync(handle.fileno())
     temporary.chmod(0o600)
     temporary.replace(path)
+    if durable:
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def executable(name):
@@ -435,6 +445,7 @@ def import_setup(data, name, paths):
 
         try:
             with store.update(rollback=rollback) as state:
+                assert_no_update(state)
                 if any(c["name"].casefold() == name.casefold() for c in state["connections"]):
                     raise ValueError("Another saved drive already uses this name")
                 # A UUID collision is an error, never permission to overwrite.
@@ -498,14 +509,25 @@ class Store:
                          {"version": 1, "launchAtLogin": False, "shutdown": False, "connections": []})
 
     @contextlib.contextmanager
-    def update(self, rollback=None):
+    def update(self, rollback=None, timeout=None, durable=False):
         self.paths.prepare()
         with (self.paths.base / "state.lock").open("a+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            if timeout is None:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("Connection settings are busy. Wait a moment and try the update again.") from None
+                        time.sleep(0.05)
             value = self.read()
             try:
                 yield value
-                write_json(self.paths.base / "connections.json", value)
+                write_json(self.paths.base / "connections.json", value, durable=durable)
             except BaseException:
                 if rollback:
                     rollback()
@@ -740,6 +762,7 @@ class Supervisor:
         self.retry, self.failures, self.blocked = {}, {}, {}
         self.revisions = {}
         self.stop_requested = False
+        self.update_handoff_token = None
         self.badge_connections = []
         self.sidebar_processes, self.sidebar_results = {}, {}
 
@@ -836,7 +859,8 @@ class Supervisor:
 
     def publish(self):
         write_json(self.paths.base / "runtime.json",
-                   {"pid": os.getpid(), "updatedAt": time.time(), "connections": self.runtime})
+                   {"pid": os.getpid(), "updatedAt": time.time(), "connections": self.runtime,
+                    "updateHandoffToken": self.update_handoff_token})
 
     def recover(self, connections):
         previous = self.store.runtime().get("connections", {})
@@ -920,6 +944,9 @@ class Supervisor:
                     connection["desiredConnected"] = False
                     connection["reconnectRequested"] = False
                     connection["revision"] = connection.get("revision", 0) + 1
+        marker = state.get("updateHandoff") or {}
+        self.update_handoff_token = (marker.get("token")
+                                     if marker.get("phase") == "resuming" and not state.get("shutdown") else None)
         mounts = mount_table()
         now = time.time()
         self.poll_sidebars(state["connections"], mounts)
@@ -1048,6 +1075,10 @@ class Supervisor:
         if any(child.get("seenMounted") for child in self.children.values()):
             return
         with self.store.update() as state:
+            # A launchd retry during installation must not reconnect drives or
+            # replace the user's saved pre-update choices with login defaults.
+            if state.get("updateHandoff"):
+                return
             state["shutdown"] = False
             for connection in state["connections"]:
                 connection["desiredConnected"] = connection.get("autoConnect", False)
@@ -1094,6 +1125,153 @@ def ensure_service(paths):
             raise RuntimeError("The local service could not start. Check the launcher log.")
         time.sleep(0.1)
     raise RuntimeError("The local service is still starting. Try again shortly.")
+
+
+@contextlib.contextmanager
+def update_handoff_lock(paths):
+    """Serialize installers and recovery without an unbounded CLI wait."""
+    paths.prepare()
+    with (paths.base / "update.lock").open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another update operation is still running. Wait for it to finish.") from None
+        yield
+
+
+def update_marker(state):
+    marker = state.get("updateHandoff")
+    if marker is None:
+        return None
+    if (not isinstance(marker, dict) or marker.get("version") != 1
+            or marker.get("phase") not in ("preparing", "prepared", "resuming")
+            or not isinstance(marker.get("token"), str) or not marker["token"]
+            or not isinstance(marker.get("intent"), dict)
+            or any(not isinstance(key, str) or type(value) is not bool
+                   for key, value in marker["intent"].items())):
+        raise RuntimeError("The saved update recovery information is invalid. Connection settings have been preserved.")
+    return marker
+
+
+def assert_no_update(state):
+    if state.get("updateHandoff") is not None:
+        raise RuntimeError("An app update is in progress. Finish or cancel it before changing connections.")
+
+
+def legacy_update_recovery_ready(paths, runtime):
+    # The first updater-capable app can inherit an older supervisor. During a
+    # busy-drive rollback it cannot acknowledge a token, but a still-mounted
+    # owned child proves it has not finished shutdown. The restored state will
+    # keep that supervisor alive on its next tick. Without an attached child,
+    # wait for the old owner to exit and start the new service instead.
+    if "updateHandoffToken" in runtime:
+        return False
+    mounts = mount_table()
+    live = runtime.get("connections", {})
+    return any(str(paths.mounts / connection["name"]) in mounts
+               and process_alive(live.get(connection["id"], {}).get("pid"))
+               for connection in Store(paths).read()["connections"])
+
+
+def resume_update_locked(paths):
+    store = Store(paths)
+    with store.update(timeout=5, durable=True) as state:
+        marker = update_marker(state)
+        if marker is None:
+            return {"ok": True, "resumed": False}
+        marker["phase"] = "resuming"
+        state["shutdown"] = False
+        for connection in state["connections"]:
+            if connection["id"] in marker["intent"]:
+                connection["desiredConnected"] = marker["intent"][connection["id"]]
+                connection["reconnectRequested"] = False
+                connection["revision"] = connection.get("revision", 0) + 1
+    # Keep recovery intent until a supervisor is actually running. The marker
+    # survives a crash or launch failure and the next launch can retry safely.
+    deadline = time.monotonic() + 8
+    while True:
+        ensure_service(paths)
+        runtime = store.runtime()
+        if (service_running(paths) and process_alive(runtime.get("pid"))
+                and (runtime.get("updateHandoffToken") == marker["token"]
+                     or legacy_update_recovery_ready(paths, runtime))):
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Your connection choices are saved, but the service has not restarted. Reopen Mountain Turtle to retry.")
+        time.sleep(0.1)
+    with store.update(timeout=5, durable=True) as state:
+        state.pop("updateHandoff", None)
+    return {"ok": True, "resumed": True, "message": "Connection choices restored after the app update."}
+
+
+def resume_update(paths):
+    # Ordinary launches must not reset choices or start a previously stopped
+    # service. Recovery is authorized only by an actual saved handoff marker.
+    if update_marker(Store(paths).read()) is None:
+        return {"ok": True, "resumed": False}
+    with update_handoff_lock(paths):
+        return resume_update_locked(paths)
+
+
+def prepare_update(paths, timeout=90):
+    """Wait for the supervisor's normal safe eject, preserving cache and intent."""
+    if not 5 <= timeout <= 180:
+        raise ValueError("Use an update preparation timeout between 5 and 180 seconds.")
+    with update_handoff_lock(paths):
+        store = Store(paths)
+        created = False
+        try:
+            with store.update(timeout=5, durable=True) as state:
+                if update_marker(state) is not None:
+                    raise RuntimeError("A previous update still needs recovery. Reopen Mountain Turtle before trying again.")
+                if any(c.get("reconnectRequested") for c in state["connections"]):
+                    raise RuntimeError("A reconnect is already in progress. Let it finish before updating.")
+                runtime = store.runtime()
+                previous_pids = {item.get("pid") for item in runtime.get("connections", {}).values()
+                                 if item.get("pid")}
+                previous_pid = runtime.get("pid")
+                created_at = time.time()
+                state["updateHandoff"] = {"version": 1, "phase": "preparing", "token": uuid.uuid4().hex,
+                                          "createdAt": created_at,
+                                          "intent": {c["id"]: bool(c.get("desiredConnected", False))
+                                                     for c in state["connections"]}}
+                created = True
+                state["shutdown"] = True
+                for connection in state["connections"]:
+                    connection["desiredConnected"] = False
+                    connection["reconnectRequested"] = False
+                    connection["revision"] = connection.get("revision", 0) + 1
+            deadline = time.monotonic() + timeout
+            mount_prefix = str(paths.mounts) + "/"
+            while True:
+                attached = {path for path in mount_table() if path.startswith(mount_prefix)}
+                runtime = store.runtime()
+                live = runtime.get("connections", {})
+                previous_pids.update(item["pid"] for item in live.values() if item.get("pid"))
+                active = any(process_alive(pid) for pid in previous_pids)
+                running = service_running(paths)
+                if any("busy" in item.get("message", "").lower() for item in live.values()
+                       if item.get("updatedAt", 0) >= created_at):
+                    raise RuntimeError("A drive is busy. Close its open files and try updating again. No drive was forcibly disconnected.")
+                if not attached and not active and not running and not process_alive(previous_pid):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Safe disconnection timed out. Wait for uploads to finish and close open files before updating. Cached changes are preserved.")
+                if not running and (attached or active):
+                    # Recover a crashed owner solely to finish its normal safe
+                    # ejection. With shutdown set, it cannot start new mounts.
+                    ensure_service(paths)
+                time.sleep(0.25)
+            with store.update(timeout=5, durable=True) as state:
+                update_marker(state)["phase"] = "prepared"
+            return {"ok": True, "prepared": True, "message": "Drives safely disconnected; ready to install and relaunch."}
+        except Exception as error:
+            if created:
+                try:
+                    resume_update_locked(paths)
+                except Exception:
+                    raise RuntimeError("The update was stopped. Your saved connection choices and cache are preserved; reopen Mountain Turtle to retry service recovery.") from None
+            raise
 
 
 def status(paths):
@@ -1200,6 +1378,8 @@ def parser():
     commands.add_parser("autostart").add_argument("setting", choices=("on", "off"))
     commands.add_parser("serve").add_argument("--at-login", action="store_true")
     commands.add_parser("shutdown")
+    commands.add_parser("prepare-update").add_argument("--timeout", type=int, default=90)
+    commands.add_parser("resume-update")
     return result
 
 
@@ -1240,6 +1420,11 @@ def action(args, paths):
     if args.command == "serve":
         Supervisor(paths).serve(args.at_login)
         return {"ok": True}
+    if args.command == "prepare-update":
+        return prepare_update(paths, args.timeout)
+    if args.command == "resume-update":
+        return resume_update(paths)
+    assert_no_update(store.read())
     if args.command == "autostart":
         set_autostart(paths, args.setting == "on")
         return {"ok": True, "message": "Login startup updated; active drives stay connected."}
@@ -1266,6 +1451,7 @@ def action(args, paths):
         return {"ok": True, "message": "AWS sign-in completed."}
     if args.command == "shutdown":
         with store.update() as state:
+            assert_no_update(state)
             state["shutdown"] = True
             for connection in state["connections"]:
                 connection["desiredConnected"] = False
@@ -1279,6 +1465,7 @@ def action(args, paths):
     credential_to_remove = None
     password_change = PasswordChange(paths)
     with store.update(rollback=password_change.rollback) as state:
+        assert_no_update(state)
         if args.command in ("add", "edit"):
             name = validate_name(args.name)
             if args.backend == "sftp":

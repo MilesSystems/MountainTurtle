@@ -19,6 +19,8 @@ class ConnectionTransferNativeTests(unittest.TestCase):
         temporary = Path(cls.directory.name)
         cls.executable = temporary / "connection-transfer-tests"
         root = Path(__file__).resolve().parents[1]
+        sparkle = subprocess.run([str(root / "scripts/fetch-sparkle.sh")],
+                                 capture_output=True, text=True, check=True, timeout=180).stdout.strip()
         sources = []
         for source in sorted((root / "Sources").glob("*.swift")):
             if source.name == "MountainTurtle.swift":
@@ -34,6 +36,7 @@ class ConnectionTransferNativeTests(unittest.TestCase):
             "xcrun", "swiftc", "-Onone", "-swift-version", "5", "-parse-as-library",
             "-target", platform.machine() + "-apple-macosx14.0",
             "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "FinderSync",
+            "-F", sparkle, "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", sparkle,
             *sources, str(root / "tests/ConnectionTransferTests.swift"), "-o", str(cls.executable),
         ], capture_output=True, text=True, timeout=180)
         if result.returncode:

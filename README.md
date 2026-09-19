@@ -59,6 +59,25 @@ release's connection editor.
 
 ## Build and install
 
+### App updates
+
+Mountain Turtle checks the signed update feed on [GitHub Releases](https://github.com/MilesSystems/MountainTurtle/releases)
+daily. Choose **Check for Updates…** in the app menu, menu-bar icon, or connection
+sidebar to check immediately. When a newer version is available, Sparkle shows
+its release notes, downloads and verifies the update, and offers **Install and
+Relaunch**. You can turn automatic checks off in the sidebar. Updates do not
+download or install until you choose to update.
+
+Before installing, the app safely ejects connected drives and saves your
+connection choices. A busy drive stops the update; cached files are preserved.
+The relaunched app restores the prior connection choices. Ordinary app quits
+continue to keep drives connected.
+
+Versions before 0.7.0 need one manual installation to gain the updater. Release
+builds support both Apple silicon and Intel Macs. See [Releasing](docs/RELEASING.md)
+for version tags, signed release assets, and the distinction between development
+previews and notarized distribution.
+
 From this checkout:
 
 ```sh

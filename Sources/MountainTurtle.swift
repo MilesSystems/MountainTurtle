@@ -602,6 +602,7 @@ struct MainView: View {
             }.padding(.horizontal, 20).padding(.vertical, 18)
             Divider().padding(.horizontal, 20)
             VStack(alignment: .leading, spacing: 14) {
+                UpdateSettingsView()
                 Toggle("Restore drives at login", isOn: Binding(get: { model.launchAtLogin }, set: { value in Task { await model.action(["autostart", value ? "on" : "off"]) } }))
                     .toggleStyle(.checkbox).font(.system(size: 11)).disabled(model.activeAction != nil)
                 Button { FIFinderSyncController.showExtensionManagementInterface() } label: {
@@ -1166,6 +1167,7 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
         observation = AppModel.shared.$connections.sink { [weak self] _ in DispatchQueue.main.async { self?.updateMenu() } }
         updateMenu()
         AppModel.shared.start()
+        AppUpdater.shared.start()
     }
     private func updateMenu() {
         let menu = NSMenu()
@@ -1180,6 +1182,8 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
         if AppModel.shared.connections.isEmpty { let empty = NSMenuItem(title: "No saved connections", action: nil, keyEquivalent: ""); empty.isEnabled = false; menu.addItem(empty) }
         menu.addItem(.separator())
         let show = NSMenuItem(title: "Show connections…", action: #selector(showWindow), keyEquivalent: ""); show.target = self; menu.addItem(show)
+        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(AppUpdater.checkForUpdates(_:)), keyEquivalent: "")
+        updates.target = AppUpdater.shared; menu.addItem(updates)
         let quit = NSMenuItem(title: "Quit app (keep drives connected)", action: #selector(quitApp), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
         item?.menu = menu
     }
@@ -1195,6 +1199,9 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
         else { showWindow() }
     }
     @objc private func quitApp() { NSApp.terminate(nil) }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AppUpdater.shared.terminationReply(for: sender)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -1218,6 +1225,7 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
             .defaultSize(width: 970, height: 680)
             .windowResizability(.contentMinSize)
             .commands {
+                CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
                 CommandGroup(replacing: .newItem) {
                     Button("Show connections") { NotificationCenter.default.post(name: .showTurtleWindow, object: nil) }.keyboardShortcut("n")
                     Button("Import connection…") {
