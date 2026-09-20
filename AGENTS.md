@@ -8,9 +8,10 @@
 - For every completed Codex change to this repository, bump `VERSION`, commit
   the finished change, push the tested result to `origin/main`, and publish its
   signed GitHub release before reporting the task complete. This applies to
-  code, UI, documentation, and repository instruction changes. Use the next patch version unless the user
-  requests another version. One completed task may contain several edits and
-  commits; bump once for that task, including any fixes made during validation.
+  code, UI, documentation, and repository instruction changes. Use the next
+  patch version unless the user requests another version. One completed task
+  may contain several edits and commits; bump once for that task, including any
+  fixes made during validation.
 - Work in an isolated `codex/` branch/worktree and preserve unrelated changes.
   Fetch current `origin/main` before integrating and again before pushing. Keep
   concurrent work, resolve conflicts, and validate the final result. Never

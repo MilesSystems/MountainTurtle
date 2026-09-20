@@ -82,14 +82,19 @@ installation. Ed25519 update authentication does not replace Apple notarization.
    `build/releases/vVERSION/`. It uploads nothing. Preparation refuses dirty
    source, a changed source commit during the build, or an existing output folder.
 3. Review the Markdown notes, `release.json`, `appcast.xml`, ZIP, and `SHA256SUMS`.
-   Test the app's update check and an actual update/relaunch. Confirm the archive
+   Test the app's affected interactions as appropriate. Confirm the archive
    contains only `Mountain Turtle.app`, that the app can launch from Applications,
    and that required Python/rclone/AWS dependencies are clear to the recipient.
-4. Create and push the matching tag at the same prepared commit:
+   Local tests with prepared assets can help before publication; the required
+   update/relaunch against the public release happens after step 5. Keep an
+   older installed version available for that check.
+4. Confirm the prepared commit is on `origin/main`, then create and push the
+   matching tag at that same commit:
 
    ```sh
+   git fetch origin main
+   git merge-base --is-ancestor HEAD origin/main
    git tag -a "v$(cat VERSION)" -m "Mountain Turtle $(cat VERSION)"
-   git push origin HEAD
    git push origin "v$(cat VERSION)"
    ```
 
@@ -97,6 +102,12 @@ installation. Ed25519 update authentication does not replace Apple notarization.
 
    ```sh
    ./scripts/publish-release.sh "build/releases/v$(cat VERSION)"
+   ```
+
+   For the current Preview channel:
+
+   ```sh
+   ./scripts/publish-release.sh --preview "build/releases/v$(cat VERSION)"
    ```
 
    Publication requires the clean prepared commit and exact already-pushed tag.
@@ -117,8 +128,10 @@ installation. Ed25519 update authentication does not replace Apple notarization.
    ```
 
    The delivery check is read-only. It does not recreate the release or replace
-   an asset. A successful delivery check still needs an actual update/relaunch
-   test on a Mac running an older version.
+   an asset. After it passes, use **Check for Updates…** on a Mac running an older
+   installed version, then **Install and Relaunch**. Verify the new installed
+   version, preserved connection settings and cached data, and restored
+   connections. Report any blocker; publication alone is not delivery completion.
 
 Preview releases have **Preview** in their title and an explicit notarization
 notice. They are ordinary GitHub Releases, rather than GitHub *prereleases*,
