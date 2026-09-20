@@ -626,7 +626,9 @@ struct MainView: View {
                 }.buttonStyle(.link).help("Show cloud and local-cache status on files in Finder")
                 HStack(spacing: 5) {
                     Image(systemName: "heart").font(.system(size: 10))
-                    Text("Free & open source").font(.system(size: 10))
+                    Link("Free & open source", destination: URL(string: "https://github.com/MilesSystems/MountainTurtle")!)
+                        .font(.system(size: 10)).buttonStyle(.plain)
+                        .help("View Mountain Turtle on GitHub")
                     Spacer()
                     Button { model.openGuide() } label: { Image(systemName: "questionmark.circle") }.buttonStyle(.plain).help("Setup and help")
                 }.foregroundStyle(moss.opacity(0.85))
