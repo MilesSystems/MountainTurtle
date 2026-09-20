@@ -1,8 +1,13 @@
 # Releasing Mountain Turtle
 
 Git pushes upload source. A versioned GitHub Release adds the downloadable app,
-release notes, and signed update feed. Publish a release for each app version you
-want users to receive; routine source pushes do not need a release.
+release notes, and signed update feed. Every completed Codex change reaching
+`origin/main` must also publish its versioned release, including documentation
+and repository instruction changes. `AGENTS.md` provides standing authorization
+to prepare, sign, tag, publish, and verify that release without another
+publication confirmation unless the user explicitly pauses or limits it.
+Until Developer ID signing and notarization are configured, continue publishing
+explicitly labelled, Apple-signed Previews through the existing update channel.
 
 The app uses [Sparkle 2.10.0](https://sparkle-project.org/documentation/) to check
 the GitHub feed at
@@ -51,8 +56,9 @@ installation. Ed25519 update authentication does not replace Apple notarization.
 
 1. Increment `VERSION` (three numeric components, for example `0.7.1`), complete
    focused tests and visual app review as appropriate, then commit
-   and push the source. Every distributed version must increase; never reuse a
-   version or replace published assets.
+   and push the source. Confirm the commit is on `origin/main` and GitHub
+   validation passes before publication. Every distributed version must
+   increase; never reuse a version or replace published assets.
 2. Prepare from a clean checkout using the full certificate display name:
 
    ```sh
@@ -69,7 +75,9 @@ installation. Ed25519 update authentication does not replace Apple notarization.
    ```
 
    `--notes` is optional; omitting it uses commit subjects since the previous
-   version tag. Preparation builds all app/helper binaries for Apple silicon and
+   version tag. If an earlier version was tagged but never published, supply
+   `--notes` covering all changes since the latest published release.
+   Preparation builds all app/helper binaries for Apple silicon and
    Intel, verifies signatures, signs the archive/feed, and creates
    `build/releases/vVERSION/`. It uploads nothing. Preparation refuses dirty
    source, a changed source commit during the build, or an existing output folder.
@@ -120,7 +128,8 @@ channel would require a separate feed before using GitHub prereleases.
 
 The GitHub workflow runs tests and builds both architectures on source/tag pushes
 and pull requests. It has no signing secrets and does not publish an unsigned
-update. Release signing and publication currently run on the release Mac.
+update. Release signing and publication currently run on the release Mac as
+the required continuation after a validated source push to `main`.
 
 ## Local update testing
 
