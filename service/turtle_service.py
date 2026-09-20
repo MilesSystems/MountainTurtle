@@ -624,7 +624,7 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
                "--log-level", "NOTICE", "--log-file", str(paths.logs / (identity + ".log")),
                "--log-file-max-size", "2Mi", "--log-file-max-backups", "2"]
     if connection["readOnly"]:
-        command.append("--read-only")
+        command += ["--read-only", "-o", "ro"]
     if rc_port is not None:
         command += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]
     return command

@@ -334,6 +334,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("credential_process", config)
         command = turtle.mount_command({**self.connection, "readOnly": True}, self.paths, "/rclone", remote)
         self.assertIn("--read-only", command)
+        self.assertIn("ro", [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-o"])
         self.assertEqual(command[command.index("--addr") + 1], "127.0.0.1:0")
         self.assertNotIn("--vfs-refresh", command)
         self.assertNotIn("--vfs-used-is-size", command)
@@ -368,6 +369,8 @@ class ServiceTests(unittest.TestCase):
                     self.assertNotIn("--no-modtime", command)
                     self.assertNotIn("--use-server-modtime", command)
                     self.assertEqual("--read-only" in command, read_only)
+                    mount_options = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-o"]
+                    self.assertEqual("ro" in mount_options, read_only)
 
     def test_settings_are_saved_and_used_on_next_mount(self):
         with patch.object(turtle, "mount_table", return_value=set()):
