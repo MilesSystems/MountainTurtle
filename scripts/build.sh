@@ -51,7 +51,7 @@ if [[ ${#SOURCES[@]} -eq 0 || ! -f "$PROJECT_DIR/service/turtle_service.py" ]]; 
     echo "Build requires Sources/*.swift and service/turtle_service.py." >&2
     exit 1
 fi
-if [[ ! -f "$PROJECT_DIR/Resources/AppIcon.icns" || ! -f "$PROJECT_DIR/Resources/icon-overlay-assets/VolumeIcon.icns" || ! -f "$PROJECT_DIR/Resources/icon-overlay-assets-sftp/VolumeIcon.icns" ]]; then
+if [[ ! -f "$PROJECT_DIR/Resources/AppIcon.icns" || ! -f "$PROJECT_DIR/Resources/TurtleDocument.icns" || ! -f "$PROJECT_DIR/Resources/icon-overlay-assets/VolumeIcon.icns" || ! -f "$PROJECT_DIR/Resources/icon-overlay-assets-sftp/VolumeIcon.icns" ]]; then
     /usr/bin/xcrun swift "$PROJECT_DIR/scripts/generate-icons.swift" "$PROJECT_DIR/Resources"
 fi
 
@@ -177,15 +177,18 @@ info = {
     "CFBundleDocumentTypes": [{"CFBundleTypeName": "Mountain Turtle Connection",
                                "CFBundleTypeRole": "Viewer",
                                "LSHandlerRank": "Owner",
-                               "CFBundleTypeIconFile": "AppIcon",
+                               "CFBundleTypeExtensions": ["turtle", "mountainturtle"],
+                               "CFBundleTypeIconFile": "TurtleDocument",
                                "LSItemContentTypes": ["io.mountainturtle.setup", "io.mountainturtle.connection"]}],
     "UTExportedTypeDeclarations": [{"UTTypeIdentifier": "io.mountainturtle.connection",
                                     "UTTypeDescription": "Mountain Turtle Connection",
-                                    "UTTypeConformsTo": ["public.json"],
+                                    "UTTypeConformsTo": ["public.data"],
+                                    "UTTypeIconFile": "TurtleDocument",
                                     "UTTypeTagSpecification": {"public.filename-extension": ["mountainturtle"]}},
                                    {"UTTypeIdentifier": "io.mountainturtle.setup",
                                     "UTTypeDescription": "Mountain Turtle Connection",
-                                    "UTTypeConformsTo": ["public.json"],
+                                    "UTTypeConformsTo": ["public.data"],
+                                    "UTTypeIconFile": "TurtleDocument",
                                     "UTTypeTagSpecification": {"public.filename-extension": ["turtle"]}}],
     "CFBundleIconFile": "AppIcon",
     "LSApplicationCategoryType": "public.app-category.utilities",

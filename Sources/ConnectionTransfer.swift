@@ -3,8 +3,8 @@ import AppKit
 import UniformTypeIdentifiers
 
 extension UTType {
-    static let mountainTurtleConnection = UTType(exportedAs: "io.mountainturtle.connection", conformingTo: .json)
-    static let turtleSetup = UTType(exportedAs: "io.mountainturtle.setup", conformingTo: .json)
+    static let mountainTurtleConnection = UTType(exportedAs: "io.mountainturtle.connection", conformingTo: .data)
+    static let turtleSetup = UTType(exportedAs: "io.mountainturtle.setup", conformingTo: .data)
 }
 
 struct ConnectionTransferRequest: Identifiable {

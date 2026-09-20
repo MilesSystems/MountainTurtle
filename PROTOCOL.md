@@ -204,7 +204,7 @@ after the user chooses **Import connection** in the review. Wrong passphrases or
 yield connection fields or save anything.
 
 The app exports `.turtle` by default and accepts legacy `.mountainturtle` files.
-Both extensions are registered for Mountain Turtle JSON connection documents
+Both extensions are registered as Mountain Turtle connection documents
 with the document role `Viewer`. A `.turtle` file can hold a settings-only
 document, a complete setup document, or the encrypted wrapper. Window drops,
 **Import connection**, and Finder opens share the same validated import path.

@@ -1,6 +1,6 @@
 # Mountain Turtle artwork
 
-The app and drive icons are original vector artwork drawn with AppKit in
+The app, document, and drive icons are original vector artwork drawn with AppKit in
 `scripts/generate-icons.swift`. They use no Mountain Duck, AWS, or third-party
 artwork. The artwork is covered by the repository's MIT license.
 
@@ -10,9 +10,10 @@ Regenerate from the repository root:
 swift scripts/generate-icons.swift "$PWD/Resources"
 ```
 
-`AppIcon.icns` is the app icon. `appIcon.png`, `s3Drive.png`, and `sftpDrive.png`
-are previews. `S3Drive.icns` and `SFTPDrive.icns` label Finder volumes with their
-connection protocol.
+`AppIcon.icns` is the app icon. `TurtleDocument.icns` is the `.turtle` and
+`.mountainturtle` document icon. `appIcon.png`, `turtleDocument.png`,
+`s3Drive.png`, and `sftpDrive.png` are previews. `S3Drive.icns` and
+`SFTPDrive.icns` label Finder volumes with their connection protocol.
 
 The read-only `icon-overlay` (S3) and `icon-overlay-sftp` (SFTP) each contain
 `.VolumeIcon.icns` and two raw AppleDouble records. Separate directories keep

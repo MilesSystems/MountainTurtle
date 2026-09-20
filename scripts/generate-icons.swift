@@ -113,6 +113,63 @@ func drawAppIcon() {
     color(0xFFFFFF, alpha: 0.55).setStroke(); tile.lineWidth = 3; tile.stroke()
 }
 
+func drawDocumentIcon() {
+    let page = NSBezierPath()
+    page.move(to: NSPoint(x: 239, y: 74))
+    page.line(to: NSPoint(x: 785, y: 74))
+    page.curve(to: NSPoint(x: 844, y: 133), controlPoint1: NSPoint(x: 821, y: 74), controlPoint2: NSPoint(x: 844, y: 97))
+    page.line(to: NSPoint(x: 844, y: 717))
+    page.line(to: NSPoint(x: 645, y: 950))
+    page.line(to: NSPoint(x: 239, y: 950))
+    page.curve(to: NSPoint(x: 180, y: 891), controlPoint1: NSPoint(x: 203, y: 950), controlPoint2: NSPoint(x: 180, y: 927))
+    page.line(to: NSPoint(x: 180, y: 133))
+    page.curve(to: NSPoint(x: 239, y: 74), controlPoint1: NSPoint(x: 180, y: 97), controlPoint2: NSPoint(x: 203, y: 74))
+    page.close()
+
+    NSGraphicsContext.saveGraphicsState()
+    shadow(28, -14, 0.24); cream.setFill(); page.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGradient(starting: color(0xFFFFFF), ending: color(0xDCECE0))!.draw(in: page, angle: -90)
+
+    let fold = NSBezierPath()
+    fold.move(to: NSPoint(x: 645, y: 950))
+    fold.line(to: NSPoint(x: 844, y: 717))
+    fold.line(to: NSPoint(x: 680, y: 717))
+    fold.curve(to: NSPoint(x: 645, y: 752), controlPoint1: NSPoint(x: 659, y: 717), controlPoint2: NSPoint(x: 645, y: 731))
+    fold.close()
+    NSGradient(starting: color(0xFDFBF2), ending: color(0xA8D1B4))!.draw(in: fold, angle: -45)
+    color(0x88B49B, alpha: 0.65).setStroke(); fold.lineWidth = 4; fold.stroke()
+
+    for (index, width) in [332, 422, 290].enumerated() {
+        let bar = NSBezierPath(roundedRect: NSRect(x: 292, y: 672 - CGFloat(index * 70), width: CGFloat(width), height: 24),
+                               xRadius: 12, yRadius: 12)
+        color(index == 0 ? 0xC8DEC7 : 0xD9E7D7).setFill()
+        bar.fill()
+    }
+
+    let badge = NSBezierPath(roundedRect: NSRect(x: 258, y: 184, width: 508, height: 336), xRadius: 82, yRadius: 82)
+    NSGraphicsContext.saveGraphicsState()
+    shadow(14, -7, 0.16); color(0xE9F2E6).setFill(); badge.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGradient(starting: color(0xF3F8EC), ending: color(0xBFDCC1))!.draw(in: badge, angle: -90)
+
+    NSGraphicsContext.saveGraphicsState()
+    let placement = NSAffineTransform()
+    placement.translateX(by: 292, yBy: 174)
+    placement.scale(by: 0.44)
+    placement.concat()
+    drawTurtle()
+    NSGraphicsContext.restoreGraphicsState()
+
+    let label = ".turtle" as NSString
+    let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 79, weight: .bold),
+                                                     .foregroundColor: color(0x1B4F45)]
+    let measure = label.size(withAttributes: attributes)
+    label.draw(at: NSPoint(x: (1024 - measure.width) / 2, y: 116), withAttributes: attributes)
+
+    color(0x9FC1A7, alpha: 0.8).setStroke(); page.lineWidth = 5; page.stroke()
+}
+
 func drawDriveIcon(label: String) {
     let front = NSBezierPath(roundedRect: NSRect(x: 130, y: 151, width: 764, height: 203), xRadius: 59, yRadius: 59)
     NSGraphicsContext.saveGraphicsState()
@@ -161,22 +218,48 @@ func png(size: Int, draw: () -> Void) -> Data {
     return bitmap.representation(using: .png, properties: [:])!
 }
 
-func writeIcon(name: String, preview: String, at output: URL, draw: () -> Void) throws {
-    let iconset = output.appendingPathComponent("\(name).iconset")
-    try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: iconset) }
-    for size in [16, 32, 128, 256, 512] {
-        for scale in [1, 2] {
-            let suffix = scale == 2 ? "@2x" : ""
-            try png(size: size * scale, draw: draw).write(to: iconset.appendingPathComponent("icon_\(size)x\(size)\(suffix).png"))
-        }
+func appendBigEndian(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8((value >> 24) & 255))
+    data.append(UInt8((value >> 16) & 255))
+    data.append(UInt8((value >> 8) & 255))
+    data.append(UInt8(value & 255))
+}
+
+func appendFourCC(_ value: String, to data: inout Data) {
+    precondition(value.utf8.count == 4)
+    data.append(contentsOf: value.utf8)
+}
+
+func writeIcns(name: String, at output: URL, draw: () -> Void) throws {
+    let entries = [
+        ("icp4", 16),
+        ("ic11", 32),
+        ("icp5", 32),
+        ("ic12", 64),
+        ("ic07", 128),
+        ("ic13", 256),
+        ("ic08", 256),
+        ("ic14", 512),
+        ("ic09", 512),
+        ("ic10", 1024),
+    ].map { type, size in
+        (type, png(size: size, draw: draw))
     }
+    let length = entries.reduce(UInt32(8)) { total, entry in total + UInt32(8 + entry.1.count) }
+    var icon = Data()
+    appendFourCC("icns", to: &icon)
+    appendBigEndian(length, to: &icon)
+    for (type, data) in entries {
+        appendFourCC(type, to: &icon)
+        appendBigEndian(UInt32(8 + data.count), to: &icon)
+        icon.append(data)
+    }
+    try icon.write(to: output.appendingPathComponent("\(name).icns"))
+}
+
+func writeIcon(name: String, preview: String, at output: URL, draw: () -> Void) throws {
     try png(size: 1024, draw: draw).write(to: output.appendingPathComponent(preview))
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-    task.arguments = ["--convert", "icns", "--output", output.appendingPathComponent("\(name).icns").path, iconset.path]
-    try task.run(); task.waitUntilExit()
-    guard task.terminationStatus == 0 else { throw NSError(domain: "Icon generation", code: Int(task.terminationStatus)) }
+    try writeIcns(name: name, at: output, draw: draw)
 }
 
 // AppleDouble entry 9 stores FinderInfo. kHasCustomIcon is 0x0400 on the
@@ -214,6 +297,7 @@ guard CommandLine.arguments.count == 2 else {
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true).standardizedFileURL
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 try writeIcon(name: "AppIcon", preview: "appIcon.png", at: output, draw: drawAppIcon)
+try writeIcon(name: "TurtleDocument", preview: "turtleDocument.png", at: output, draw: drawDocumentIcon)
 for (label, name, preview, directory) in [
     ("S3", "S3Drive", "s3Drive.png", "icon-overlay-assets"),
     ("SFTP", "SFTPDrive", "sftpDrive.png", "icon-overlay-assets-sftp"),
@@ -225,4 +309,4 @@ for (label, name, preview, directory) in [
     try finderMetadata(flags: 0x0400).write(to: overlay.appendingPathComponent("root-finder-info.ad"))
     try finderMetadata(flags: 0x4000).write(to: overlay.appendingPathComponent("volume-icon-finder-info.ad"))
 }
-print("Created original app, S3, and SFTP drive icons in \(output.path)")
+print("Created original app, document, S3, and SFTP drive icons in \(output.path)")
