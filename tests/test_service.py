@@ -350,6 +350,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("--read-only", command)
         self.assertIn("ro", [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-o"])
         self.assertEqual(command[command.index("--addr") + 1], "127.0.0.1:0")
+        self.assertEqual(command[command.index("--log-level") + 1], "INFO")
         self.assertNotIn("--vfs-refresh", command)
         self.assertNotIn("--fast-list", command)
         self.assertNotIn("--use-server-modtime", command)
@@ -672,6 +673,56 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(error=text):
                 path.write_text(f"{stamp} ERROR : {text}\n")
                 self.assertIn(expected, turtle.tail_error(connection, self.paths))
+
+    def test_activity_log_parser_detects_move_delete_and_upload_failures(self):
+        stamp = "2026/09/21 13:45:00"
+        parsed = turtle.parse_activity_log_line(
+            f"{stamp} INFO  : Needs-Review/photo.jpg: Moved (server-side)", self.connection["id"], now=1)
+        self.assertEqual(parsed["kind"], "move")
+        self.assertEqual(parsed["state"], "complete")
+        self.assertEqual(parsed["path"], "Needs-Review/photo.jpg")
+        deleted = turtle.parse_activity_log_line(
+            f"{stamp} INFO  : Needs-Review: Removed directory", self.connection["id"], now=1)
+        self.assertEqual(deleted["kind"], "delete")
+        failed = turtle.parse_activity_log_line(
+            f"{stamp} ERROR : photo.jpg: vfs cache: failed to upload try #1", self.connection["id"], now=1)
+        self.assertEqual(failed["kind"], "upload")
+        self.assertEqual(failed["state"], "failed")
+        self.assertIsNone(turtle.parse_activity_log_line(
+            f"{stamp} INFO  : ._photo.jpg: Deleted", self.connection["id"], now=1))
+
+    def test_activity_events_are_aggregated_bounded_and_exposed_in_status(self):
+        turtle.record_activity_events(self.paths, [
+            {"connectionID": self.connection["id"], "kind": "delete", "state": "complete",
+             "path": "old/a.jpg", "updatedAt": 100},
+            {"connectionID": self.connection["id"], "kind": "delete", "state": "complete",
+             "path": "old/b.jpg", "updatedAt": 105},
+            {"connectionID": self.connection["id"], "kind": "move", "state": "complete",
+             "path": "renamed", "updatedAt": 200},
+        ], now=200)
+        events = turtle.activity_events(self.paths, self.connection["id"])
+        self.assertEqual(events[0]["kind"], "move")
+        self.assertEqual(events[1]["kind"], "delete")
+        self.assertEqual(events[1]["count"], 2)
+        self.assertEqual(events[1]["title"], "Deleted 2 items")
+        self.assertEqual(events[1]["detail"], "Latest: old/b.jpg")
+        with patch.object(turtle, "mount_table", return_value=set()), \
+             patch.object(turtle, "dependencies", return_value={}):
+            result = turtle.status(self.paths)["connections"][0]
+        self.assertEqual(result["events"][1]["title"], "Deleted 2 items")
+
+    def test_activity_log_poll_reads_only_new_rclone_lines(self):
+        path = self.paths.logs / (self.connection["id"] + ".log")
+        path.write_text("2026/09/21 13:45:00 INFO  : old.jpg: Deleted\n")
+        supervisor = turtle.Supervisor(self.paths)
+        supervisor.poll_activity_logs([self.connection], now=100)
+        self.assertEqual(turtle.activity_events(self.paths, self.connection["id"]), [])
+        with path.open("a") as handle:
+            handle.write("2026/09/21 13:45:05 INFO  : new.jpg: Deleted\n")
+        supervisor.poll_activity_logs([self.connection], now=105)
+        events = turtle.activity_events(self.paths, self.connection["id"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["detail"], "new.jpg")
 
     def test_exported_keys_cannot_override_the_selected_profile(self):
         with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "stale", "AWS_SECRET_ACCESS_KEY": "stale",

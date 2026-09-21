@@ -157,7 +157,7 @@ class DriveAccessNativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (ROOT / "Sources/MountainTurtle.swift").read_text()
-        models = source[source.index("struct Connection:"):source.index("enum ServiceClient {")]
+        models = source[source.index("struct DriveEvent:"):source.index("enum ServiceClient {")]
         method_start = source.index("    func updateDrive(")
         method_end = source.index("\n}\n\nstruct BrandIcon", method_start)
         method = source[method_start:method_end]

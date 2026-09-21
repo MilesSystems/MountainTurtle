@@ -302,6 +302,14 @@ choose **Customize Toolbar**, and add Mountain Turtle. Rename and cache changes
 safely eject and reconnect when needed; busy files or pending uploads can prevent
 the change.
 
+The selected drive's **Activity queue & history** shows recent local work with
+icons for move/rename, delete, upload, folder download, and failures. Finder
+folder renames can appear as move operations because remote storage handles them
+that way, and large deletes are grouped into a single counted queue item.
+Completed operations remain as recent history. This history is local to this
+Mac's mounted drive session; changes made from other computers or cloud consoles
+are not a complete audit trail here.
+
 ## Files, caching, and disconnecting
 
 File contents are fetched on demand and cached on this Mac. A connected volume
@@ -361,9 +369,10 @@ an application opening the original through this NFS mount.
 
 Read-only connections block remote edits. If you explicitly enable writing,
 normal file actions can upload, overwrite, rename, or delete remote files using
-the saved account's permissions. The isolated SFTP fixture has separate live
-write verification; its results do not establish write durability for every
-server or S3 bucket.
+the saved account's permissions. Mountain Turtle records those local mounted
+drive operations in the selected drive's Activity queue & history when rclone
+reports them. The isolated SFTP fixture has separate live write verification; its
+results do not establish write durability for every server or S3 bucket.
 
 To change a saved drive’s access, choose **Change…** beside **Access**, toggle
 **Read only**, and choose **Save access**. A connected drive safely ejects and

@@ -9,6 +9,53 @@ let cream = Color(red: 0.97, green: 0.97, blue: 0.94)
 let ink = Color(red: 0.13, green: 0.20, blue: 0.17)
 let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.6.0"
 
+struct DriveEvent: Codable, Identifiable, Equatable {
+    var id: String
+    var connectionID: String
+    var kind: String
+    var state: String
+    var title: String
+    var detail: String
+    var count: Int?
+    var firstAt: Double?
+    var updatedAt: Double
+
+    var systemImage: String {
+        switch kind {
+        case "move": return "arrow.right.arrow.left"
+        case "delete": return "trash"
+        case "upload": return "arrow.up.circle"
+        case "download": return "arrow.down.circle"
+        case "refresh": return "arrow.clockwise"
+        default: return "list.bullet.rectangle"
+        }
+    }
+
+    var tint: Color {
+        if state == "failed" { return .orange }
+        if state == "running" || state == "queued" { return moss }
+        if kind == "delete" { return .red.opacity(0.82) }
+        return moss
+    }
+
+    var stateLabel: String {
+        switch state {
+        case "queued": return "Queued"
+        case "running": return "In progress"
+        case "failed": return "Needs attention"
+        default: return "Done"
+        }
+    }
+
+    var timeLabel: String {
+        let date = Date(timeIntervalSince1970: updatedAt)
+        if abs(Date().timeIntervalSince(date)) < 24 * 3600 {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 struct Connection: Codable, Identifiable, Equatable {
     var id: String
     var name: String
@@ -36,6 +83,7 @@ struct Connection: Codable, Identifiable, Equatable {
     var keyFile: String?
     var knownHostsFile: String?
     var passwordConfigured: Bool?
+    var events: [DriveEvent]? = nil
 
     var isSFTP: Bool { backend == "sftp" }
     var supportsPhotoBrowser: Bool { !isSFTP }
@@ -728,6 +776,9 @@ struct MainView: View {
                 if let message = model.driveMessage {
                     notice(message, symbol: "checkmark.circle", color: moss)
                 }
+                if let events = connection.events, !events.isEmpty {
+                    activitySection(Array(events.prefix(8)))
+                }
                 if connection.supportsPhotoBrowser {
                 HStack(spacing: 12) {
                     Image(systemName: "photo.on.rectangle.angled").font(.title2).foregroundStyle(moss)
@@ -803,6 +854,43 @@ struct MainView: View {
             Text(label).foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
             Text(value).frame(maxWidth: .infinity, alignment: .trailing).textSelection(.enabled).lineLimit(2)
         }.font(.system(size: 12)).padding(.vertical, 13)
+    }
+
+    private func activitySection(_ events: [DriveEvent]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Activity queue & history", systemImage: "clock.arrow.circlepath").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("\(events.count) recent operations").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            VStack(spacing: 0) {
+                ForEach(events) { event in
+                    activityRow(event)
+                    if event.id != events.last?.id { Divider().padding(.leading, 32) }
+                }
+            }
+        }.padding(16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func activityRow(_ event: DriveEvent) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: event.systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(event.tint)
+                .frame(width: 20)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(event.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ink)
+                    Spacer(minLength: 10)
+                    Text(event.timeLabel).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                if !event.detail.isEmpty {
+                    Text(event.detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                }
+                Text(event.stateLabel).font(.system(size: 10, weight: .medium)).foregroundStyle(event.tint)
+            }
+        }.padding(.vertical, 9)
     }
 
     private func notice(_ text: String, symbol: String, color: Color) -> some View {

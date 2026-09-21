@@ -34,6 +34,11 @@ CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24, "fastBrowsing
 FOLDER_CACHE_FILE = "folder-cache.json"
 FOLDER_CACHE_CHUNK_BYTES = 1024 * 1024
 FOLDER_CACHE_MAX_SECONDS = 8760 * 3600
+EVENT_QUEUE_FILE = "event-queue.json"
+EVENT_QUEUE_LIMIT = 100
+EVENT_QUEUE_DISPLAY_LIMIT = 8
+EVENT_AGGREGATE_SECONDS = 30
+EVENT_LOG_READ_LIMIT = 512 * 1024
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 ICON_ASSETS = {
@@ -46,6 +51,18 @@ SIDEBAR_FALLBACK = ("The drive stays connected. In Finder, choose Go → Compute
 AUTH_ERRORS = re.compile(r"expiredtoken|token.{0,30}expir|sso.{0,50}(invalid|fail|expir)|"
                          r"refresh cached credentials|tokenretrievalerror|invalidgrant|"
                          r"unauthorizedexception|aws sso login", re.I)
+RCLONE_LOG_LINE = re.compile(r"^(?P<stamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+"
+                             r"(?P<level>[A-Z]+)\s+:\s+(?P<body>.*)$")
+RCLONE_FILE_ACTIONS = (
+    (re.compile(r"^(?P<path>.+?): Moved \(server-side\)$", re.I), "move", "complete"),
+    (re.compile(r"^(?P<path>.+?): Renamed$", re.I), "move", "complete"),
+    (re.compile(r"^(?P<path>.+?): Deleted$", re.I), "delete", "complete"),
+    (re.compile(r"^(?P<path>.+?): Removed directory$", re.I), "delete", "complete"),
+    (re.compile(r"^(?P<path>.+?): Copied \(new\)$", re.I), "upload", "complete"),
+    (re.compile(r"^(?P<path>.+?): Copied \(replaced existing\)$", re.I), "upload", "complete"),
+    (re.compile(r"^(?P<path>.+?): vfs cache: queuing for upload", re.I), "upload", "running"),
+    (re.compile(r"^(?P<path>.+?): vfs cache: upload succeeded", re.I), "upload", "complete"),
+)
 
 
 class Paths:
@@ -675,7 +692,7 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
                "--vfs-read-ahead", "0", "--vfs-read-chunk-streams", "0",
                "--vfs-read-chunk-size", "1Mi", "--vfs-read-chunk-size-limit", "1Mi",
                "--contimeout", "10s", "--timeout", "1m", "--transfers", "2",
-               "--log-level", "NOTICE", "--log-file", str(paths.logs / (identity + ".log")),
+               "--log-level", "INFO", "--log-file", str(paths.logs / (identity + ".log")),
                "--log-file-max-size", "2Mi", "--log-file-max-backups", "2"]
     if fast_s3_browsing:
         command += ["--use-server-modtime", "--fast-list", "--vfs-refresh", "--attr-timeout", "10s"]
@@ -757,6 +774,175 @@ def tail_error(connection, paths):
     except FileNotFoundError:
         pass
     return ""
+
+
+def _event_queue_path(paths):
+    return paths.base / EVENT_QUEUE_FILE
+
+
+def _sanitize_event_path(value):
+    if not isinstance(value, str):
+        return ""
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip()
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if len(cleaned) > 160:
+        cleaned = "..." + cleaned[-157:]
+    return cleaned
+
+
+def _ignore_activity_path(value):
+    path = _sanitize_event_path(value)
+    name = path.rsplit("/", 1)[-1]
+    return not path or name in (".DS_Store", "._.", ".VolumeIcon.icns", "._.VolumeIcon.icns") or name.startswith("._")
+
+
+def _event_title(kind, state, count):
+    noun = "item" if count == 1 else "items"
+    if kind == "move":
+        return f"Moved or renamed {count} {noun}" if state != "failed" else f"Move failed for {count} {noun}"
+    if kind == "delete":
+        return f"Deleted {count} {noun}" if state != "failed" else f"Delete failed for {count} {noun}"
+    if kind == "upload":
+        if state == "running":
+            return f"Uploading {count} {noun}"
+        return f"Uploaded {count} {noun}" if state != "failed" else f"Upload failed for {count} {noun}"
+    if kind == "download":
+        if state == "running":
+            return f"Downloading {count} folder" if count == 1 else f"Downloading {count} folders"
+        if state == "queued":
+            return f"Folder download queued" if count == 1 else f"{count} folder downloads queued"
+        return f"Folder downloaded" if state == "complete" and count == 1 else f"Folder downloads updated"
+    if kind == "refresh":
+        return "Folder listings refreshed"
+    return "Drive activity updated"
+
+
+def _event_detail(path, count):
+    path = _sanitize_event_path(path)
+    if not path:
+        return ""
+    return path if count == 1 else "Latest: " + path
+
+
+def _event_timestamp(stamp, now):
+    try:
+        return time.mktime(time.strptime(stamp, "%Y/%m/%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return now
+
+
+def parse_activity_log_line(line, connection_id, now=None):
+    now = time.time() if now is None else now
+    match = RCLONE_LOG_LINE.match(line.strip())
+    if not match:
+        return None
+    body, level = match.group("body"), match.group("level")
+    timestamp = _event_timestamp(match.group("stamp"), now)
+    if level in ("ERROR", "CRITICAL") and "vfs cache:" in body:
+        path = body.split(":", 1)[0]
+        if _ignore_activity_path(path):
+            return None
+        return {"connectionID": connection_id, "kind": "upload", "state": "failed",
+                "path": _sanitize_event_path(path), "count": 1, "updatedAt": timestamp}
+    for pattern, kind, state in RCLONE_FILE_ACTIONS:
+        action = pattern.match(body)
+        if not action:
+            continue
+        path = action.group("path")
+        if _ignore_activity_path(path):
+            return None
+        return {"connectionID": connection_id, "kind": kind, "state": state,
+                "path": _sanitize_event_path(path), "count": 1, "updatedAt": timestamp}
+    return None
+
+
+def _normalize_activity_events(value):
+    raw = value.get("events", []) if isinstance(value, dict) and value.get("version") == 1 else []
+    events = []
+    for item in (raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        connection_id = item.get("connectionID")
+        kind = item.get("kind")
+        state = item.get("state")
+        updated = item.get("updatedAt")
+        count = item.get("count", 1)
+        if (not isinstance(connection_id, str) or not connection_id or kind not in ("move", "delete", "upload", "download", "refresh")
+                or state not in ("queued", "running", "complete", "failed") or type(updated) not in (int, float)):
+            continue
+        if type(count) is not int or count < 1:
+            count = 1
+        path = _sanitize_event_path(item.get("path", ""))
+        first = item.get("firstAt") if type(item.get("firstAt")) in (int, float) else updated
+        events.append({"id": item.get("id") if isinstance(item.get("id"), str) else str(uuid.uuid4()),
+                       "connectionID": connection_id, "kind": kind, "state": state, "count": count,
+                       "path": path, "title": _event_title(kind, state, count),
+                       "detail": _event_detail(path, count), "firstAt": first, "updatedAt": updated})
+    return sorted(events, key=lambda event: event["updatedAt"], reverse=True)[:EVENT_QUEUE_LIMIT]
+
+
+@contextlib.contextmanager
+def _activity_update(paths):
+    paths.prepare()
+    with (paths.base / "event-queue.lock").open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            value = read_json(_event_queue_path(paths), {"version": 1, "events": []})
+        except (OSError, ValueError, TypeError):
+            value = {"version": 1, "events": []}
+        state = {"version": 1, "events": _normalize_activity_events(value)}
+        yield state
+        state["events"] = _normalize_activity_events(state)
+        write_json(_event_queue_path(paths), state)
+
+
+def record_activity_events(paths, incoming, now=None):
+    now = time.time() if now is None else now
+    prepared = []
+    for event in incoming:
+        if not isinstance(event, dict):
+            continue
+        event = dict(event)
+        event["updatedAt"] = event.get("updatedAt") if type(event.get("updatedAt")) in (int, float) else now
+        event["count"] = event.get("count") if type(event.get("count")) is int and event.get("count") > 0 else 1
+        event["path"] = _sanitize_event_path(event.get("path", ""))
+        if event.get("kind") in ("move", "delete", "upload", "download", "refresh") and event.get("state") in ("queued", "running", "complete", "failed"):
+            prepared.append(event)
+    if not prepared:
+        return
+    with _activity_update(paths) as state:
+        events = state["events"]
+        for event in prepared:
+            match = None
+            for existing in events:
+                if (existing["connectionID"] == event["connectionID"] and existing["kind"] == event["kind"]
+                        and existing["state"] == event["state"]
+                        and abs(event["updatedAt"] - existing["updatedAt"]) <= EVENT_AGGREGATE_SECONDS):
+                    match = existing
+                    break
+            if match:
+                match["count"] += event["count"]
+                match["path"] = event["path"] or match.get("path", "")
+                match["updatedAt"] = event["updatedAt"]
+                match["title"] = _event_title(match["kind"], match["state"], match["count"])
+                match["detail"] = _event_detail(match.get("path", ""), match["count"])
+            else:
+                count = event["count"]
+                events.insert(0, {"id": str(uuid.uuid4()), "connectionID": event["connectionID"],
+                                  "kind": event["kind"], "state": event["state"], "count": count,
+                                  "path": event["path"], "title": _event_title(event["kind"], event["state"], count),
+                                  "detail": _event_detail(event["path"], count),
+                                  "firstAt": event["updatedAt"], "updatedAt": event["updatedAt"]})
+        state["events"] = sorted(events, key=lambda item: item["updatedAt"], reverse=True)[:EVENT_QUEUE_LIMIT]
+
+
+def activity_events(paths, connection_id, limit=EVENT_QUEUE_DISPLAY_LIMIT):
+    try:
+        events = _normalize_activity_events(read_json(_event_queue_path(paths), {"version": 1, "events": []}))
+    except (OSError, ValueError, TypeError):
+        events = []
+    return [event for event in events if event["connectionID"] == connection_id][:limit]
 
 
 class FolderCacheCancelled(Exception):
@@ -878,6 +1064,9 @@ def folder_cache_request(paths, connections, requested_path, mode, seconds=None,
             })
         state["folders"] = folders
     action = "stopped" if mode == "stop" else "queued"
+    if mode != "stop":
+        record_activity_events(paths, [{"connectionID": connection["id"], "kind": "download",
+                                        "state": "queued", "path": relative, "updatedAt": now}], now)
     return {"ok": True, "action": action, "connectionID": connection["id"], "relativePath": relative}
 
 
@@ -1102,6 +1291,7 @@ class Supervisor:
         self.children, self.ejections, self.runtime = {}, {}, {}
         self.retry, self.failures, self.blocked = {}, {}, {}
         self.revisions = {}
+        self.activity_log_cursors = {}
         self.stop_requested = False
         self.update_handoff_token = None
         self.badge_connections = []
@@ -1229,6 +1419,9 @@ class Supervisor:
         folder_cache_update_record(self.paths, key, mark_running)
         if not folder_cache_job_current(self.paths, key, job_id):
             return
+        record_activity_events(self.paths, [{"connectionID": connection["id"], "kind": "download",
+                                             "state": "running", "path": record.get("relativePath", ""),
+                                             "updatedAt": started}])
         current = dict(record, jobID=job_id)
 
         def worker():
@@ -1249,6 +1442,8 @@ class Supervisor:
 
     def finish_folder_cache_job(self, connection, key, job_id, result):
         finished = time.time()
+        state = result.get("state", "failed")
+        event_state = "complete" if state == "complete" else "failed"
 
         def update(record):
             if record.get("jobID") != job_id:
@@ -1271,6 +1466,8 @@ class Supervisor:
             return record
 
         folder_cache_update_record(self.paths, key, update)
+        record_activity_events(self.paths, [{"connectionID": connection["id"], "kind": "download",
+                                             "state": event_state, "path": key[1], "updatedAt": finished}])
 
     def poll_folder_cache(self, connections, mounts, now):
         for key, thread in list(self.folder_jobs.items()):
@@ -1286,6 +1483,37 @@ class Supervisor:
             if record.get("refreshAfter", 0) <= now:
                 self.start_folder_cache_job(connection, record)
                 return
+
+    def poll_activity_logs(self, connections, now):
+        for connection in connections:
+            identity = connection["id"]
+            path = self.paths.logs / (identity + ".log")
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                self.activity_log_cursors.pop(identity, None)
+                continue
+            cursor = self.activity_log_cursors.get(identity)
+            inode = (info.st_dev, info.st_ino)
+            if cursor is None:
+                self.activity_log_cursors[identity] = {"inode": inode, "offset": info.st_size}
+                continue
+            offset = cursor.get("offset", 0) if cursor.get("inode") == inode and info.st_size >= cursor.get("offset", 0) else 0
+            if info.st_size <= offset:
+                cursor.update(inode=inode, offset=info.st_size)
+                continue
+            if info.st_size - offset > EVENT_LOG_READ_LIMIT:
+                offset = info.st_size - EVENT_LOG_READ_LIMIT
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(offset)
+                    data = handle.read(EVENT_LOG_READ_LIMIT + 1)
+            except OSError:
+                continue
+            lines = data.decode(errors="replace").splitlines()
+            events = [event for event in (parse_activity_log_line(line, identity, now) for line in lines) if event]
+            record_activity_events(self.paths, events, now)
+            self.activity_log_cursors[identity] = {"inode": inode, "offset": info.st_size}
 
     def publish(self):
         write_json(self.paths.base / "runtime.json",
@@ -1337,16 +1565,31 @@ class Supervisor:
             config_path.chmod(0o600)
             (self.paths.cache / identity).mkdir(parents=True, exist_ok=True, mode=0o700)
             started = time.time()
-            with (self.paths.logs / (identity + ".log")).open("ab", buffering=0) as error_log:
+            log_path = self.paths.logs / (identity + ".log")
+            try:
+                log_info = log_path.stat()
+                existing_log_size = log_info.st_size
+                existing_log_inode = (log_info.st_dev, log_info.st_ino)
+            except FileNotFoundError:
+                existing_log_size = 0
+                existing_log_inode = None
+            with log_path.open("ab", buffering=0) as error_log:
                 process = subprocess.Popen(mount_command(connection, self.paths, deps["rclone"], remote, rc["rcPort"]),
                                            env=child_env,
                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error_log,
                                            start_new_session=True)
+            if existing_log_inode is None:
+                try:
+                    log_info = log_path.stat()
+                    existing_log_inode = (log_info.st_dev, log_info.st_ino)
+                except FileNotFoundError:
+                    pass
             # Logs span reconnects; keep errors from an earlier process out of
             # the new connection's status, including after supervisor recovery.
             current["lastMountAt"] = connection["lastMountAt"] = started
             current.pop("refreshRequested", None)
             self.children[identity] = {"process": process, "started": started, "seenMounted": False, "remoteControl": rc}
+            self.activity_log_cursors[identity] = {"inode": existing_log_inode, "offset": existing_log_size}
             self.record(connection, "connecting", "Connecting to SFTP…" if connection_backend(connection) == "sftp" else "Connecting to S3…", process.pid)
             self.publish()
 
@@ -1381,6 +1624,7 @@ class Supervisor:
         now = time.time()
         self.poll_sidebars(state["connections"], mounts)
         self.poll_folder_cache(state["connections"], mounts, now)
+        self.poll_activity_logs(state["connections"], now)
         for connection in state["connections"]:
             identity = connection["id"]
             reconnecting = connection.get("reconnectRequested", False) and connection.get("desiredConnected", False)
@@ -1738,6 +1982,7 @@ def status(paths):
                     state=live.get("state", "disconnected") if running else "disconnected",
                     message=live.get("message", "") if running else "", mountPath=str(paths.mounts / connection["name"]),
                     updatedAt=live.get("updatedAt", connection.get("updatedAt", 0)))
+        item["events"] = activity_events(paths, connection["id"])
         item["mounted"] = item["mountPath"] in mounted
         # Finder can eject between supervisor ticks. Only describe sidebar state
         # for a volume that is still present in the current kernel mount table.

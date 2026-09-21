@@ -36,6 +36,10 @@ Every connection includes:
   `needsLogin`, or `error`; plus `message`, `mountPath`, and numeric `updatedAt`.
 - `cacheMaxSizeMiB` (default 2048), `cacheMaxAgeHours` (default 24),
   `fastBrowsing` (default false).
+- `events`, a newest-first bounded list of local drive activity records with
+  `id`, `connectionID`, `kind` (`move`, `delete`, `upload`, `download`,
+  `refresh`), `state` (`queued`, `running`, `complete`, `failed`), `title`,
+  `detail`, `count`, `firstAt`, and `updatedAt`.
 - Optional `sidebarItemID` / `sidebarError` while the drive is mounted.
 
 SFTP records additionally include `host`, `user`, `port` (integer, default 22),
@@ -282,6 +286,12 @@ at a time by reading regular files through the mount. Symlinks are not followed.
 Timed rules expire automatically; `stop` removes the rule without deleting
 already cached files. Folder warming is paused while a drive is disconnected and
 is retried while the rule remains active.
+
+The service also maintains `event-queue.json`, a bounded local queue and recent
+operation history for mounted-drive operations. It is populated from rclone's
+local INFO log lines and folder-cache jobs, aggregates bursts such as bulk
+deletes, keeps completed operations as local history, and is exposed through
+`status` as `events`. It is a local UI queue/history, not a provider-wide audit log.
 
 The supervisor runs the bundled `Mountain Turtle Sidebar` helper with
 `ensure UUID MOUNT_PATH` once per confirmed mount generation, with serialized
