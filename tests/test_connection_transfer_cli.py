@@ -23,7 +23,7 @@ class ConnectionTransferCLITests(unittest.TestCase):
             "backend": "s3", "bucket": "photo-archive", "profile": "archive-reader",
             "region": "us-west-2", "readOnly": True, "autoConnect": True,
             "desiredConnected": True, "revision": 9, "updatedAt": 123,
-            "cacheMaxSizeMiB": 1024, "cacheMaxAgeHours": 12,
+            "cacheMaxSizeMiB": 1024, "cacheMaxAgeHours": 12, "fastBrowsing": True,
         }
 
     def save(self, connection=None):
@@ -101,12 +101,13 @@ class ConnectionTransferCLITests(unittest.TestCase):
         document = {"format": "io.mountainturtle.connection", "version": 1,
                     "connection": {key: self.connection[key] for key in (
                         "name", "backend", "bucket", "profile", "region", "readOnly", "autoConnect",
-                        "cacheMaxSizeMiB", "cacheMaxAgeHours")}}
+                        "cacheMaxSizeMiB", "cacheMaxAgeHours", "fastBrowsing")}}
         with self.forbid_side_effects(), patch.object(turtle, "Store", side_effect=AssertionError("Store called")):
             code, result = self.run_main("inspect-connection", data=json.dumps(document).encode())
         self.assertEqual(code, 0)
         self.assertTrue(result["ok"])
         self.assertEqual(result["connection"]["name"], self.connection["name"])
+        self.assertTrue(result["connection"]["fastBrowsing"])
         self.assertFalse(result["connection"].get("autoConnect", False))
         self.assertFalse(result["connection"].get("desiredConnected", False))
         self.assertEqual(self.snapshot(), {})

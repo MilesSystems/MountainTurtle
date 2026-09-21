@@ -25,6 +25,7 @@ struct Connection: Codable, Identifiable, Equatable {
     var mounted: Bool?
     var cacheMaxSizeMiB: Int?
     var cacheMaxAgeHours: Int?
+    var fastBrowsing: Bool? = nil
     var sidebarError: String?
     var backend: String?
     var host: String?
@@ -770,6 +771,8 @@ struct MainView: View {
                         infoRow("AWS profile", connection.profile, symbol: "person.crop.circle")
                         Divider().padding(.leading, 42)
                         infoRow("Region", connection.region, symbol: "globe.americas")
+                        Divider().padding(.leading, 42)
+                        infoRow("Browsing", connection.fastBrowsing == true ? "Fast" : "Precise dates", symbol: connection.fastBrowsing == true ? "bolt" : "calendar")
                     }
                     Divider().padding(.leading, 42)
                     HStack(spacing: 12) {
@@ -1033,7 +1036,7 @@ struct ConnectionEditor: View {
                         Text(importNotice).font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         if let imported {
-                            Text("Cache: \(imported.connection.cacheMaxSizeMiB ?? 2048) MiB, \(imported.connection.cacheMaxAgeHours ?? 24) hours. You can change this in Download & cache settings.")
+                            Text("Cache: \(imported.connection.cacheMaxSizeMiB ?? 2048) MiB, \(imported.connection.cacheMaxAgeHours ?? 24) hours. Browsing: \(imported.connection.fastBrowsing == true ? "fast" : "precise dates"). You can change these in Download & cache settings.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -1168,6 +1171,7 @@ struct ConnectionEditor: View {
         if let imported {
             args += ["--cache-max-size-mib", String(imported.connection.cacheMaxSizeMiB ?? 2048),
                      "--cache-max-age-hours", String(imported.connection.cacheMaxAgeHours ?? 24)]
+            if !isSFTP { args.append(imported.connection.fastBrowsing == true ? "--fast-browsing" : "--precise-browsing") }
         }
         if autoConnect { args.append("--auto-connect") }
         Task {

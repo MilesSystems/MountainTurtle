@@ -112,6 +112,7 @@ struct DriveSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sizeMiB = 2048
     @State private var ageHours = 24
+    @State private var fastBrowsing = false
     @State private var info: CacheInformation?
     @State private var failure: String?
     @State private var saving = false
@@ -141,6 +142,13 @@ struct DriveSettingsView: View {
                 Picker("Remove unused files after", selection: $ageHours) {
                     ForEach(ages, id: \.self) { age in Text(age == 1 ? "1 hour" : age < 24 ? "\(age) hours" : "\(age / 24) day\(age == 24 ? "" : "s")").tag(age) }
                 }
+                if connection.supportsPhotoBrowser {
+                    Toggle("Fast folder browsing", isOn: $fastBrowsing).toggleStyle(.checkbox)
+                }
+            }
+            if connection.supportsPhotoBrowser {
+                Text(fastBrowsing ? "Finder uses S3 upload dates and warms folder listings after connecting or refreshing." : "Finder keeps original modified dates when S3 object metadata provides them.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Text("These are cache targets, not a download allowance. Files in use or waiting to upload are kept." + (connection.supportsPhotoBrowser ? " The photo browser has a separate 256 MB thumbnail cache." : ""))
                 .font(.caption).foregroundStyle(.secondary)
@@ -167,6 +175,7 @@ struct DriveSettingsView: View {
             .task {
                 sizeMiB = connection.cacheMaxSizeMiB ?? 2048
                 ageHours = connection.cacheMaxAgeHours ?? 24
+                fastBrowsing = connection.fastBrowsing ?? false
                 await loadInfo()
             }
             .interactiveDismissDisabled(saving)
@@ -187,7 +196,8 @@ struct DriveSettingsView: View {
 
     private func apply(clear: Bool) {
         saving = true; failure = nil
-        let args = clear ? ["clear-cache", connection.id] : ["settings", connection.id, "--cache-max-size-mib", String(sizeMiB), "--cache-max-age-hours", String(ageHours)]
+        var args = clear ? ["clear-cache", connection.id] : ["settings", connection.id, "--cache-max-size-mib", String(sizeMiB), "--cache-max-age-hours", String(ageHours)]
+        if !clear && connection.supportsPhotoBrowser { args.append(fastBrowsing ? "--fast-browsing" : "--precise-browsing") }
         Task {
             if await model.updateDrive(connection, arguments: args) {
                 if clear { await loadInfo() } else { dismiss() }

@@ -314,6 +314,13 @@ it does not download file contents. These dates are not photo capture dates.
 After upgrading from a version that showed a fixed December 31, 1999 or
 January 1, 2000 date, reconnect the drive to refresh Finder's file attributes.
 
+S3 drives can enable **Fast folder browsing** in **Download & cache settings**.
+That mode favors Finder responsiveness for large buckets: it uses S3 listing
+timestamps instead of per-object metadata timestamps, enables recursive directory
+warming on connect and refresh, and keeps folder listings warm longer. It still
+does not download file contents, but Finder may show upload/last-modified dates
+instead of the original source file modification dates.
+
 **Date Created is unavailable on the current NFSv3 mounts.** This protocol does
 not carry a file creation time, so Finder may show December 31, 2000 or
 January 1, 2001 as a placeholder. That value is not the file's original creation
@@ -329,10 +336,11 @@ dates requires the source folders or separately preserved metadata. See
 [how S3 folders work](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-folders.html).
 
 The default original-file cache target is 2 GiB, with removal after 24 hours
-without access. Both values are configurable per drive. Memory buffering,
-rclone read-ahead, parallel chunk prefetch, and native NFS read-ahead are disabled.
-Sequential reads use chunks no larger than 1 MiB. These settings reduce extra
-reads, but cannot stop Finder from explicitly reading originals for previews.
+without access. Both values and S3 fast folder browsing are configurable per
+drive. Memory buffering, rclone read-ahead, parallel chunk prefetch, and native
+NFS read-ahead are disabled. Sequential reads use chunks no larger than 1 MiB.
+These settings reduce extra reads, but cannot stop Finder from explicitly
+reading originals for previews.
 Cache size and age are eviction targets, not a cap on total downloads; open or
 dirty files may remain beyond the targets. **Clear cache** only removes safe
 local cached copies after ejection, never remote files or pending uploads.

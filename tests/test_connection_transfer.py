@@ -15,11 +15,11 @@ class ConnectionTransferTests(unittest.TestCase):
         self.s3 = {"id": "local-id", "name": "Family Photos", "backend": "s3",
                    "bucket": "family-photos", "profile": "personal", "region": "us-east-1",
                    "readOnly": False, "autoConnect": True,
-                   "cacheMaxSizeMiB": 512, "cacheMaxAgeHours": 6}
+                   "cacheMaxSizeMiB": 512, "cacheMaxAgeHours": 6, "fastBrowsing": True}
         self.sftp = {"name": "Server files", "backend": "sftp", "host": "files.example.com",
                      "user": "photographer", "port": 2222, "remotePath": '/Family "photos":ro',
                      "authMode": "keyFile", "readOnly": True, "autoConnect": True,
-                     "cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
+                     "cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24, "fastBrowsing": False}
 
     def document(self, source=None, **overrides):
         result = {"format": transfer.FORMAT, "version": transfer.VERSION,
@@ -64,11 +64,12 @@ class ConnectionTransferTests(unittest.TestCase):
 
     def test_legacy_s3_records_receive_portable_defaults(self):
         legacy = {key: value for key, value in self.s3.items()
-                  if key not in ("backend", "cacheMaxSizeMiB", "cacheMaxAgeHours")}
+                  if key not in ("backend", "cacheMaxSizeMiB", "cacheMaxAgeHours", "fastBrowsing")}
         result = transfer.decode(transfer.encode(legacy))
         self.assertEqual(result["backend"], "s3")
         self.assertEqual(result["cacheMaxSizeMiB"], 2048)
         self.assertEqual(result["cacheMaxAgeHours"], 24)
+        self.assertFalse(result["fastBrowsing"])
 
     def test_import_never_enables_automatic_connection(self):
         document = self.document()
@@ -120,14 +121,22 @@ class ConnectionTransferTests(unittest.TestCase):
     def test_required_fields_cannot_be_omitted(self):
         for source in (self.s3, self.sftp):
             for key in self.document(source)["connection"]:
+                if key == "fastBrowsing":
+                    continue
                 document = self.document(source)
                 del document["connection"][key]
                 with self.subTest(backend=source["backend"], key=key), self.assertRaises(transfer.ConnectionTransferError):
                     self.decode_document(document)
 
+    def test_fast_browsing_defaults_to_precise_for_older_connection_files(self):
+        document = self.document()
+        del document["connection"]["fastBrowsing"]
+        self.assertFalse(self.decode_document(document)["fastBrowsing"])
+
     def test_field_types_and_numeric_bounds_are_strict(self):
         invalid = [("backend", []), ("backend", "webdav"), ("name", None), ("bucket", 123),
-                   ("readOnly", 1), ("autoConnect", "false"), ("cacheMaxSizeMiB", True),
+                   ("readOnly", 1), ("autoConnect", "false"), ("fastBrowsing", "true"),
+                   ("cacheMaxSizeMiB", True),
                    ("cacheMaxSizeMiB", 63), ("cacheMaxSizeMiB", 1048577), ("cacheMaxAgeHours", 1.5),
                    ("cacheMaxAgeHours", 0), ("cacheMaxAgeHours", 8761)]
         for key, value in invalid:

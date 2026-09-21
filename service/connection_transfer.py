@@ -14,13 +14,13 @@ VERSION = 1
 MAX_FILE_BYTES = 64 * 1024
 
 COMMON_FIELDS = frozenset(("name", "backend", "readOnly", "autoConnect",
-                           "cacheMaxSizeMiB", "cacheMaxAgeHours"))
+                           "cacheMaxSizeMiB", "cacheMaxAgeHours", "fastBrowsing"))
 BACKEND_FIELDS = {
     "s3": frozenset(("bucket", "profile", "region")),
     "sftp": frozenset(("host", "user", "port", "remotePath", "authMode")),
 }
 DEFAULTS = {"readOnly": True, "autoConnect": False,
-            "cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24,
+            "cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24, "fastBrowsing": False,
             "port": 22, "remotePath": "", "authMode": "agent"}
 
 
@@ -53,6 +53,8 @@ def _integer(connection, key, minimum, maximum):
 def _validate(connection):
     if type(connection) is not dict:
         raise ConnectionTransferError("The connection file must contain one connection object.")
+    connection = dict(connection)
+    connection.setdefault("fastBrowsing", DEFAULTS["fastBrowsing"])
     backend = connection.get("backend")
     if type(backend) is not str or backend not in BACKEND_FIELDS:
         raise ConnectionTransferError("This connection file uses an unsupported connection type.")
@@ -65,7 +67,7 @@ def _validate(connection):
     name = _string(connection, "name", 180).strip()
     if not name or name.startswith(".") or any(c in "/:\\" for c in name):
         raise ConnectionTransferError("Choose a visible drive name without slashes, colons, or control characters.")
-    for key in ("readOnly", "autoConnect"):
+    for key in ("readOnly", "autoConnect", "fastBrowsing"):
         if type(connection[key]) is not bool:
             raise ConnectionTransferError(f"The connection's {key} must be true or false.")
     _integer(connection, "cacheMaxSizeMiB", 64, 1048576)

@@ -351,6 +351,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("ro", [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-o"])
         self.assertEqual(command[command.index("--addr") + 1], "127.0.0.1:0")
         self.assertNotIn("--vfs-refresh", command)
+        self.assertNotIn("--fast-list", command)
+        self.assertNotIn("--use-server-modtime", command)
         self.assertNotIn("--vfs-used-is-size", command)
 
     def test_icon_overlay_is_materialized_from_package_safe_assets(self):
@@ -386,6 +388,27 @@ class ServiceTests(unittest.TestCase):
                     mount_options = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-o"]
                     self.assertEqual("ro" in mount_options, read_only)
 
+    def test_fast_browsing_uses_s3_listing_metadata_and_warms_directory_cache(self):
+        with patch.object(turtle, "mount_table", return_value=set()):
+            turtle.action(self.args("settings", self.connection["id"], "--fast-browsing"), self.paths)
+        connection = self.store.read()["connections"][0]
+        command = turtle.mount_command(connection, self.paths, "/rclone", "s3:photos")
+        self.assertTrue(connection["fastBrowsing"])
+        self.assertIn("--use-server-modtime", command)
+        self.assertIn("--fast-list", command)
+        self.assertIn("--vfs-refresh", command)
+        self.assertEqual(command[command.index("--dir-cache-time") + 1], "6h")
+        self.assertEqual(command[command.index("--attr-timeout") + 1], "10s")
+        with patch.object(turtle, "mount_table", return_value=set()):
+            self.assertTrue(turtle.status(self.paths)["connections"][0]["fastBrowsing"])
+
+    def test_fast_browsing_does_not_change_sftp_mount_options(self):
+        connection = dict(self.connection, backend="sftp", fastBrowsing=True)
+        command = turtle.mount_command(connection, self.paths, "/rclone", "sftp:/photos")
+        self.assertNotIn("--use-server-modtime", command)
+        self.assertNotIn("--fast-list", command)
+        self.assertNotIn("--vfs-refresh", command)
+
     def test_settings_are_saved_and_used_on_next_mount(self):
         with patch.object(turtle, "mount_table", return_value=set()):
             turtle.action(self.args("settings", self.connection["id"], "--cache-max-size-mib", "512",
@@ -403,7 +426,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_omitted_settings_preserve_custom_values_when_editing(self):
         with self.store.update() as state:
-            state["connections"][0].update(cacheMaxSizeMiB=512, cacheMaxAgeHours=6)
+            state["connections"][0].update(cacheMaxSizeMiB=512, cacheMaxAgeHours=6, fastBrowsing=True)
         with patch.object(turtle, "mount_table", return_value=set()):
             turtle.action(self.args("edit", self.connection["id"], "--name", self.connection["name"],
                                     "--bucket", self.connection["bucket"], "--profile", self.connection["profile"],
@@ -411,6 +434,7 @@ class ServiceTests(unittest.TestCase):
         saved = self.store.read()["connections"][0]
         self.assertEqual(saved["cacheMaxSizeMiB"], 512)
         self.assertEqual(saved["cacheMaxAgeHours"], 6)
+        self.assertTrue(saved["fastBrowsing"])
 
     def test_settings_and_rename_refuse_attached_drives(self):
         mounted = {str(self.paths.mounts / self.connection["name"])}
@@ -459,17 +483,21 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse((self.paths.cache / self.connection["id"]).exists())
         self.assertEqual(self.store.read()["connections"][0]["bucket"], self.connection["bucket"])
 
-    def test_refresh_invalidates_directory_cache_without_remount_or_preload(self):
+    def test_refresh_warms_directory_cache_without_remount_or_file_downloads(self):
         with self.store.update() as state:
             state["connections"][0].update(desiredConnected=True, refreshRequested=True)
         supervisor, child = turtle.Supervisor(self.paths), Mock()
         child.pid, child.poll.return_value = 12345, None
-        supervisor.children[self.connection["id"]] = {"process": child, "started": time.time() - 10}
+        rc = {"rcPort": 42000, "rcUser": "metrics", "rcPass": "private", "sessionID": "session"}
+        supervisor.children[self.connection["id"]] = {"process": child, "started": time.time() - 10,
+                                                       "remoteControl": rc}
         with patch.object(turtle, "mount_table", return_value={str(self.paths.mounts / self.connection["name"])}), \
+             patch.object(turtle, "start_directory_refresh", return_value={"jobid": 7}) as refresh, \
              patch.object(turtle.subprocess, "Popen") as start:
             supervisor.tick()
             supervisor.tick()
-        child.send_signal.assert_called_once_with(turtle.signal.SIGHUP)
+        refresh.assert_called_once_with(rc)
+        child.send_signal.assert_not_called()
         child.terminate.assert_not_called()
         start.assert_not_called()
         self.assertFalse(self.store.read()["connections"][0]["refreshRequested"])

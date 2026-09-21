@@ -39,7 +39,8 @@ class SetupBundleTests(unittest.TestCase):
         self.connection = {"name": "Family files", "backend": "sftp", "host": "files.example.com",
                            "user": "family", "port": 2222, "remotePath": "/", "authMode": "keyFile",
                            "readOnly": False, "autoConnect": True, "cacheMaxSizeMiB": 2048,
-                           "cacheMaxAgeHours": 24, "keyFile": "/local/key", "id": "local-id"}
+                           "cacheMaxAgeHours": 24, "fastBrowsing": False, "keyFile": "/local/key",
+                           "id": "local-id"}
         self.key = self.keys["ed25519"][0]
         self.hosts = self.pin()
 

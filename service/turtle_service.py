@@ -2,6 +2,7 @@
 """Mountain Turtle's local JSON CLI and native macOS NFS supervisor."""
 
 import argparse
+import base64
 import contextlib
 import fcntl
 import ipaddress
@@ -21,13 +22,14 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.request
 import uuid
 
 LABEL = "com.mountainturtle.service"
 SERVICE = Path(__file__).resolve()
 APP_BUNDLE_IDENTIFIER = "io.mountainturtle.app"
 NETWORK_VOLUMES_SERVICE = "kTCCServiceSystemPolicyNetworkVolumes"
-CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
+CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24, "fastBrowsing": False}
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 ICON_ASSETS = {
@@ -528,16 +530,20 @@ def import_setup(data, name, paths):
     return {"ok": True, "id": identity}
 
 
-def cache_settings(connection, size=None, age=None):
+def cache_settings(connection, size=None, age=None, fast_browsing=None):
     values = {key: connection.get(key, default) for key, default in CACHE_DEFAULTS.items()}
     if size is not None:
         values["cacheMaxSizeMiB"] = size
     if age is not None:
         values["cacheMaxAgeHours"] = age
+    if fast_browsing is not None:
+        values["fastBrowsing"] = fast_browsing
     if not 64 <= values["cacheMaxSizeMiB"] <= 1048576:
         raise ValueError("Choose a cache limit between 64 and 1048576 MiB")
     if not 1 <= values["cacheMaxAgeHours"] <= 8760:
         raise ValueError("Choose a cache age between 1 and 8760 hours")
+    if type(values["fastBrowsing"]) is not bool:
+        raise ValueError("Choose whether fast folder browsing is enabled")
     return values
 
 
@@ -645,8 +651,11 @@ def connection_config(connection, paths):
 def mount_command(connection, paths, rclone, remote, rc_port=None):
     identity = connection["id"]
     cache = cache_settings(connection)
+    fast_s3_browsing = connection_backend(connection) == "s3" and cache["fastBrowsing"]
+    dir_cache_time = "6h" if fast_s3_browsing else "30m"
     # Keep backend modification times: --no-modtime exposes rclone's fixed
-    # 2000-01-01 fallback in Finder. S3 reads the saved mtime via object metadata.
+    # 2000-01-01 fallback in Finder. Fast S3 browsing deliberately uses server
+    # listing mtimes to avoid slower per-object metadata lookups.
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
                "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
@@ -658,17 +667,50 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
                "--vfs-cache-mode", "full", "--cache-dir", str(paths.cache / identity),
                "--vfs-cache-max-size", f'{cache["cacheMaxSizeMiB"]}Mi', "--vfs-cache-min-free-space", "20Gi",
                "--vfs-cache-max-age", f'{cache["cacheMaxAgeHours"]}h', "--vfs-write-back", "5s",
-               "--dir-cache-time", "30m", "--poll-interval", "0", "--buffer-size", "0",
+               "--dir-cache-time", dir_cache_time, "--poll-interval", "0", "--buffer-size", "0",
                "--vfs-read-ahead", "0", "--vfs-read-chunk-streams", "0",
                "--vfs-read-chunk-size", "1Mi", "--vfs-read-chunk-size-limit", "1Mi",
                "--contimeout", "10s", "--timeout", "1m", "--transfers", "2",
                "--log-level", "NOTICE", "--log-file", str(paths.logs / (identity + ".log")),
                "--log-file-max-size", "2Mi", "--log-file-max-backups", "2"]
+    if fast_s3_browsing:
+        command += ["--use-server-modtime", "--fast-list", "--vfs-refresh", "--attr-timeout", "10s"]
     if connection["readOnly"]:
         command += ["--read-only", "-o", "ro"]
     if rc_port is not None:
         command += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]
     return command
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def remote_control_post(remote_control, method, payload, timeout=3):
+    port = remote_control.get("rcPort")
+    user, password = remote_control.get("rcUser"), remote_control.get("rcPass")
+    if (type(port) is not int or not 1 <= port <= 65535 or not isinstance(user, str)
+            or not user or not isinstance(password, str) or not password):
+        raise ValueError("Reconnect this drive before refreshing folder listings")
+    credentials = base64.b64encode(f"{user}:{password}".encode()).decode()
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/{method}", data=data,
+                                     headers={"Authorization": "Basic " + credentials,
+                                              "Content-Type": "application/json"}, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=timeout) as response:
+        raw = response.read(16 * 1024 + 1)
+    if len(raw) > 16 * 1024:
+        raise ValueError("Folder listing refresh returned an invalid response")
+    result = json.loads(raw or b"{}")
+    if not isinstance(result, dict):
+        raise ValueError("Folder listing refresh returned an invalid response")
+    return result
+
+
+def start_directory_refresh(remote_control):
+    return remote_control_post(remote_control, "vfs/refresh", {"recursive": True, "_async": True})
 
 
 def remote_control_settings():
@@ -1068,11 +1110,16 @@ class Supervisor:
                 if not child.get("expectedStop"):
                     self.start_sidebar(connection, child)
                 if connection.get("refreshRequested") and now - child["started"] >= 5:
-                    # SIGHUP only invalidates directory listings; it does not fetch file data.
                     try:
-                        child["process"].send_signal(signal.SIGHUP)
+                        start_directory_refresh(child["remoteControl"])
                     except ProcessLookupError:
                         continue  # The next tick handles the process exit and normal backoff.
+                    except Exception:
+                        logging.warning("Could not refresh folder listings for %s", identity, exc_info=True)
+                        try:
+                            child["process"].send_signal(signal.SIGHUP)
+                        except ProcessLookupError:
+                            continue  # The next tick handles the process exit and normal backoff.
                     with self.store.update() as current_state:
                         current = find_connection(current_state, identity)
                         if current.get("revision", 0) == connection.get("revision", 0):
@@ -1415,6 +1462,10 @@ def parser():
         operation.add_argument("--auto-connect", action="store_true")
         operation.add_argument("--cache-max-size-mib", type=int)
         operation.add_argument("--cache-max-age-hours", type=int)
+        browsing = operation.add_mutually_exclusive_group()
+        browsing.add_argument("--fast-browsing", action="store_true", dest="fast_browsing")
+        browsing.add_argument("--precise-browsing", action="store_false", dest="fast_browsing")
+        operation.set_defaults(fast_browsing=None)
     for command in ("remove", "connect", "disconnect", "login", "refresh", "reconnect", "cache-info", "clear-cache"):
         commands.add_parser(command).add_argument("id")
     rename = commands.add_parser("rename")
@@ -1424,6 +1475,10 @@ def parser():
     settings.add_argument("id")
     settings.add_argument("--cache-max-size-mib", type=int)
     settings.add_argument("--cache-max-age-hours", type=int)
+    browsing = settings.add_mutually_exclusive_group()
+    browsing.add_argument("--fast-browsing", action="store_true", dest="fast_browsing")
+    browsing.add_argument("--precise-browsing", action="store_false", dest="fast_browsing")
+    settings.set_defaults(fast_browsing=None)
     access = commands.add_parser("access")
     access.add_argument("id")
     mode = access.add_mutually_exclusive_group(required=True)
@@ -1543,7 +1598,8 @@ def action(args, paths):
             else:
                 connection = {"id": identity}
                 state["connections"].append(connection)
-            settings = cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours)
+            settings = cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours,
+                                      args.fast_browsing)
             old_password = connection.get("passwordConfigured", False)
             password = ""
             if args.backend == "sftp" and args.auth_mode == "password":
@@ -1599,7 +1655,8 @@ def action(args, paths):
                         raise ValueError("Another saved drive already uses this name")
                     connection["name"] = name
                 elif args.command == "settings":
-                    connection.update(cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours))
+                    connection.update(cache_settings(connection, args.cache_max_size_mib, args.cache_max_age_hours,
+                                                     args.fast_browsing))
                 else:
                     clear_cache(connection, paths)
                 connection["updatedAt"] = time.time()

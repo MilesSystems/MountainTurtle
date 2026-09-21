@@ -34,7 +34,8 @@ Every connection includes:
 - `readOnly`, `autoConnect`, `desiredConnected`, `mounted`.
 - `state`: `disconnected`, `connecting`, `connected`, `disconnecting`,
   `needsLogin`, or `error`; plus `message`, `mountPath`, and numeric `updatedAt`.
-- `cacheMaxSizeMiB` (default 2048), `cacheMaxAgeHours` (default 24).
+- `cacheMaxSizeMiB` (default 2048), `cacheMaxAgeHours` (default 24),
+  `fastBrowsing` (default false).
 - Optional `sidebarItemID` / `sidebarError` while the drive is mounted.
 
 SFTP records additionally include `host`, `user`, `port` (integer, default 22),
@@ -124,7 +125,8 @@ The settings-only document has this envelope:
     "readOnly": true,
     "autoConnect": false,
     "cacheMaxSizeMiB": 2048,
-    "cacheMaxAgeHours": 24
+    "cacheMaxAgeHours": 24,
+    "fastBrowsing": false
   }
 }
 ```
@@ -231,10 +233,10 @@ or canceling either review. No import modifies global `~/.ssh` files or config.
 | `reconnect ID` | Safely ejects and reconnects. A later disconnect cancels reconnect intent. |
 | `remove ID` | Disconnected only; removes the saved record without deleting remote files. |
 | `login ID` | S3 only: AWS SSO device authorization with a five-minute timeout. |
-| `refresh ID` | Mounted only: invalidates rclone directory listings via SIGHUP without fetching file bodies. |
+| `refresh ID` | Mounted only: refreshes rclone directory listings through the authenticated loopback control API, recursively and asynchronously where supported, without fetching file bodies. Falls back to invalidating listings if the live control request is unavailable. |
 | `rename ID --name NAME` | Disconnected only; preserves remote destination and cache identity. |
 | `access ID --read-only\|--read-write` | Disconnected only when changing mode; rejects pending/ambiguous writes and preserves destination, cache, authentication, and startup preferences. An unchanged mode is a no-op. |
-| `settings ID [--cache-max-size-mib N] [--cache-max-age-hours N]` | Disconnected only; size 64–1,048,576 MiB, age 1–8,760 hours, soft eviction targets. |
+| `settings ID [--cache-max-size-mib N] [--cache-max-age-hours N] [--fast-browsing\|--precise-browsing]` | Disconnected only; size 64–1,048,576 MiB, age 1–8,760 hours, soft eviction targets. Fast browsing is S3-only: it uses S3 server listing timestamps, recursive directory warming, `--fast-list`, a longer directory cache, and a short attribute cache. |
 | `cache-info ID` | Bounded local scan returns `ok`, `usedBytes`, `files`, `partial`; partial usage is a lower estimate. |
 | `clear-cache ID` | Disconnected only; rejects pending/ambiguous writes, including previously writable caches. |
 | `autostart on\|off` | Updates the per-user LaunchAgent without stopping current mounts. |

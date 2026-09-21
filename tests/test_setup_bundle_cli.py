@@ -37,7 +37,8 @@ class SetupBundleCLITests(unittest.TestCase):
                            "host": "files.example.test", "user": "family", "port": 30224,
                            "remotePath": "/", "authMode": "keyFile", "readOnly": False,
                            "autoConnect": True, "desiredConnected": True, "revision": 8,
-                           "cacheMaxSizeMiB": 1024, "cacheMaxAgeHours": 12}
+                           "cacheMaxSizeMiB": 1024, "cacheMaxAgeHours": 12,
+                           "fastBrowsing": False}
         self.known_hosts = b"[files.example.test]:30224 " + self.host_key + b"\n"
         self.data = setup_bundle.encode(self.connection, self.private_key, self.known_hosts)
 

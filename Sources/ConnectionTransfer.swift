@@ -19,6 +19,7 @@ struct PortableConnection: Decodable {
     let readOnly: Bool
     let cacheMaxSizeMiB: Int
     let cacheMaxAgeHours: Int
+    let fastBrowsing: Bool?
     var bucket: String?
     var profile: String?
     var region: String?
@@ -33,7 +34,7 @@ struct PortableConnection: Decodable {
                    region: region ?? "", readOnly: readOnly, autoConnect: false,
                    desiredConnected: false, state: "disconnected", mountPath: "",
                    cacheMaxSizeMiB: cacheMaxSizeMiB, cacheMaxAgeHours: cacheMaxAgeHours,
-                   backend: backend, host: host, user: user, port: port,
+                   fastBrowsing: fastBrowsing, backend: backend, host: host, user: user, port: port,
                    remotePath: remotePath, authMode: authMode)
     }
 }
