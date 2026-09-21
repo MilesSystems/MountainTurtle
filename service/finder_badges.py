@@ -14,12 +14,14 @@ import os
 import secrets
 import stat
 import threading
+import time
 
 
 MAX_BODY = 64 * 1024
 MAX_PATHS = 128
 MAX_METADATA = 1024 * 1024
 MAX_CONFIG = 64 * 1024
+FOLDER_CACHE_FILE = "folder-cache.json"
 ROOT_FIELDS = ("id", "name", "mountPath", "state", "mounted", "supportsPhotoBrowser")
 
 
@@ -140,6 +142,36 @@ def _coverage(info):
     return True, end == size, bool(intervals)
 
 
+def _folder_cache_badge(paths, connection, relative):
+    kind, cache = _local_file(paths.base, [FOLDER_CACHE_FILE], metadata=True)
+    if kind == "missing":
+        return None
+    if kind != "present" or not isinstance(cache, dict) or cache.get("version") != 1:
+        return None
+    target = "/".join(relative)
+    now = time.time()
+    folders = cache.get("folders", [])
+    if not isinstance(folders, list):
+        return None
+    for record in folders:
+        if not isinstance(record, dict):
+            continue
+        if record.get("connectionID") != connection.get("id") or record.get("relativePath", "") != target:
+            continue
+        keep_until = record.get("keepUntil")
+        if keep_until is not None and (type(keep_until) not in (int, float) or keep_until <= now):
+            return None
+        state = record.get("state")
+        if state in ("queued", "warming"):
+            return "downloading"
+        if state == "complete":
+            return "cached"
+        if state == "error":
+            return "error"
+        return "unknown"
+    return None
+
+
 def badge_for_path(paths, connections, requested_path):
     requested = _parts(requested_path)
     matches = []
@@ -160,6 +192,9 @@ def badge_for_path(paths, connections, requested_path):
                    for part in relative)):
         return "unknown"
     try:
+        folder_badge = _folder_cache_badge(paths, connection, relative)
+        if folder_badge:
+            return folder_badge
         identity = _component(connection["id"])
         uses_overlay = _uses_icon_overlay(paths, connection, identity)
         if uses_overlay is None:
@@ -195,9 +230,10 @@ def badge_for_path(paths, connections, requested_path):
 class BadgeBridge:
     """One bounded worker serves authenticated local Finder extension requests."""
 
-    def __init__(self, paths, state_reader, folder_requester=None):
+    def __init__(self, paths, state_reader, folder_requester=None, folder_refresher=None):
         self.paths, self.state_reader = paths, state_reader
         self.folder_requester = folder_requester
+        self.folder_refresher = folder_refresher
         self.directory = paths.base / "Finder"
         self.config = self.directory / "bridge.json"
         self.token = secrets.token_urlsafe(32)
@@ -275,7 +311,7 @@ class BadgeBridge:
             def do_POST(self):
                 if not self.authorized():
                     return
-                if self.path not in ("/v1/badges", "/v1/folder-cache"):
+                if self.path not in ("/v1/badges", "/v1/folder-cache", "/v1/folder-refresh"):
                     self.reply(404, {"error": "Not found"})
                     return
                 lengths = self.headers.get_all("Content-Length", [])
@@ -307,10 +343,16 @@ class BadgeBridge:
                                   for path in requested]
                         self.reply(200, {"badges": badges})
                     else:
-                        if bridge.folder_requester is None:
+                        if self.path == "/v1/folder-refresh":
+                            if bridge.folder_refresher is None:
+                                self.reply(503, {"error": "Folder refresh unavailable"})
+                                return
+                            self.reply(200, bridge.folder_refresher(body))
+                        elif bridge.folder_requester is None:
                             self.reply(503, {"error": "Folder downloads unavailable"})
                             return
-                        self.reply(200, bridge.folder_requester(body))
+                        else:
+                            self.reply(200, bridge.folder_requester(body))
                 except (ValueError, UnicodeError, TypeError):
                     self.reply(400, {"error": "Invalid request"})
                 except (OSError, TimeoutError):

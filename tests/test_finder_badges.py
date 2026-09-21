@@ -53,6 +53,14 @@ class BadgeTests(unittest.TestCase):
     def complete(self, **extra):
         return dict({"Size": 10, "Dirty": False, "Rs": [{"Pos": 0, "Size": 10}]}, **extra)
 
+    def folder_cache(self, relative_path, state="queued", keep_until=None):
+        self.paths.base.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "folders": [{
+            "connectionID": self.connection["id"], "relativePath": relative_path,
+            "state": state, "keepUntil": keep_until, "updatedAt": 100,
+        }]}
+        (self.paths.base / badges.FOLDER_CACHE_FILE).write_text(json.dumps(payload))
+
     def test_uncached_path_never_touches_mount_or_scans(self):
         real_open = os.open
         opened = []
@@ -124,6 +132,23 @@ class BadgeTests(unittest.TestCase):
         for name in (".VolumeIcon.icns", "._.", "._.VolumeIcon.icns", ".DS_Store", "nested/._photo.jpg"):
             self.assertEqual(self.state(name), "unknown")
 
+    def test_folder_cache_rules_badge_the_selected_folder(self):
+        for state, expected in (("queued", "downloading"), ("warming", "downloading"),
+                                ("complete", "cached"), ("error", "error")):
+            with self.subTest(state=state):
+                self.folder_cache("Needs-Review", state=state)
+                self.assertEqual(self.state("Needs-Review"), expected)
+
+    def test_expired_and_removed_folder_cache_rules_do_not_badge_the_folder(self):
+        self.folder_cache("Needs-Review", state="warming", keep_until=1)
+        with patch.object(badges.time, "time", return_value=2):
+            self.assertEqual(self.state("Needs-Review"), "online")
+        (self.paths.base / badges.FOLDER_CACHE_FILE).write_text(json.dumps({"version": 1, "folders": []}))
+        self.assertEqual(self.state("Needs-Review"), "online")
+        (self.paths.base / badges.FOLDER_CACHE_FILE).write_text("not json")
+        self.cache(self.complete(), name="Needs-Review")
+        self.assertEqual(self.state("Needs-Review"), "cached")
+
     def test_traversal_other_roots_and_prefix_collisions_are_rejected(self):
         for path in (self.root + "/../secret", self.root + "/./photo.jpg", self.root + "2/photo.jpg",
                      self.root + "//photo.jpg", "/etc/passwd", "relative", self.root + "/nul\0"):
@@ -160,8 +185,9 @@ class BadgeTests(unittest.TestCase):
         self.cache(self.complete(), namespace="s3/" + self.connection["bucket"])
         self.assertEqual(self.state(), "cached")
 
-    def bridge(self, folder_requester=None):
-        bridge = badges.BadgeBridge(self.paths, lambda: [dict(self.connection)], folder_requester).start()
+    def bridge(self, folder_requester=None, folder_refresher=None):
+        bridge = badges.BadgeBridge(self.paths, lambda: [dict(self.connection)],
+                                    folder_requester, folder_refresher).start()
         self.addCleanup(bridge.stop)
         return bridge
 
@@ -301,6 +327,15 @@ class BadgeTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True, "action": "queued"})
         self.assertEqual(seen, [request])
 
+    def test_bridge_accepts_bounded_folder_refresh_requests(self):
+        seen = []
+        bridge = self.bridge(folder_refresher=lambda body: seen.append(body) or {"ok": True, "throttled": False})
+        request = {"path": self.root + "/2025"}
+        status, response = self.request(bridge, "POST", "/v1/folder-refresh", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(response, {"ok": True, "throttled": False})
+        self.assertEqual(seen, [request])
+
     def test_bridge_rejects_folder_cache_when_unavailable_or_invalid(self):
         bridge = self.bridge()
         self.assertEqual(self.request(bridge, "POST", "/v1/folder-cache",
@@ -308,6 +343,12 @@ class BadgeTests(unittest.TestCase):
         bridge = self.bridge(lambda _body: (_ for _ in ()).throw(ValueError("bad folder")))
         self.assertEqual(self.request(bridge, "POST", "/v1/folder-cache",
                                       {"path": self.root, "mode": "forever"})[0], 400)
+        bridge = self.bridge()
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-refresh",
+                                      {"path": self.root})[0], 503)
+        bridge = self.bridge(folder_refresher=lambda _body: (_ for _ in ()).throw(ValueError("bad folder")))
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-refresh",
+                                      {"path": self.root})[0], 400)
 
     def test_bridge_rejects_unbounded_or_invalid_batches(self):
         bridge = self.bridge()

@@ -287,6 +287,13 @@ Timed rules expire automatically; `stop` removes the rule without deleting
 already cached files. Folder warming is paused while a drive is disconnected and
 is retried while the rule remains active.
 
+The bridge also accepts `POST /v1/folder-refresh` with
+`{"path":"/absolute/opened/folder"}`. The service validates that the path is
+inside a mounted saved drive and asks that drive's private rclone control API to
+refresh only that directory listing. Requests are throttled per folder. This is
+how Finder can notice files deleted or renamed from another Mac without waiting
+for the normal directory-cache expiry or recursively refreshing the whole drive.
+
 The service also maintains `event-queue.json`, a bounded local queue and recent
 operation history for mounted-drive operations. It is populated from rclone's
 local INFO log lines and folder-cache jobs, aggregates bursts such as bulk

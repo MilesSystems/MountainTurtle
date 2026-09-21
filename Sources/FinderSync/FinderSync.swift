@@ -54,7 +54,7 @@ private final class LocalOnlySessionDelegate: NSObject, URLSessionTaskDelegate {
 }
 
 private enum Badge: String, CaseIterable {
-    case online, cached, partial, pending, error, unknown
+    case online, cached, partial, pending, loading, downloading, error, unknown
 
     var label: String {
         switch self {
@@ -62,6 +62,8 @@ private enum Badge: String, CaseIterable {
         case .cached: return "Cached on this Mac"
         case .partial: return "Partially cached"
         case .pending: return "Waiting to upload"
+        case .loading: return "Loading folder"
+        case .downloading: return "Keeping folder downloaded"
         case .error: return "Needs attention"
         case .unknown: return "Status unavailable"
         }
@@ -71,6 +73,8 @@ private enum Badge: String, CaseIterable {
         switch self {
         case .cached: return NSColor(srgbRed: 0.04, green: 0.70, blue: 0.38, alpha: 1)
         case .pending: return NSColor(srgbRed: 0.12, green: 0.58, blue: 0.91, alpha: 1)
+        case .loading: return NSColor(srgbRed: 0.20, green: 0.50, blue: 0.78, alpha: 1)
+        case .downloading: return NSColor(srgbRed: 0.13, green: 0.46, blue: 0.76, alpha: 1)
         case .partial: return NSColor(srgbRed: 0.38, green: 0.52, blue: 0.66, alpha: 1)
         case .online: return NSColor(srgbRed: 0.48, green: 0.62, blue: 0.68, alpha: 1)
         case .error: return NSColor(srgbRed: 0.88, green: 0.25, blue: 0.25, alpha: 1)
@@ -84,6 +88,8 @@ private enum Badge: String, CaseIterable {
         case .cached: return "checkmark"
         case .partial: return "circle.lefthalf.filled"
         case .pending: return "arrow.triangle.2.circlepath"
+        case .loading: return "arrow.clockwise"
+        case .downloading: return "chart.pie.fill"
         case .error: return "exclamationmark"
         case .unknown: return "questionmark"
         }
@@ -135,7 +141,10 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var observed = Set<String>()
     private var requested: [String: URL] = [:]
     private var requestOrder: [String] = []
+    private var serviceBadges: [String: Badge] = [:]
     private var currentBadges: [String: Badge] = [:]
+    private var loadingFolders: [String: Date] = [:]
+    private var folderRefreshRequests: [String: Date] = [:]
     private var bridge: Bridge?
     private var timer: Timer?
     private var refreshing = false
@@ -146,6 +155,8 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var actionURLs: [Int: URL] = [:]
     private var folderActions: [Int: FolderCacheAction] = [:]
     private var nextActionTag = 1
+    private let folderLoadingDuration: TimeInterval = 6
+    private let folderRemoteRefreshInterval: TimeInterval = 20
 
     override init() {
         super.init()
@@ -158,7 +169,10 @@ final class MountainTurtleFinderSync: FIFinderSync {
     }
 
     override func beginObservingDirectory(at url: URL) {
-        observed.insert(url.standardizedFileURL.path)
+        let path = url.standardizedFileURL.path
+        observed.insert(path)
+        markFolderLoading(path)
+        requestRemoteFolderRefresh(path)
         scheduleRefresh()
     }
 
@@ -169,6 +183,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
             if !observed.contains(where: { contains(path, in: $0) }) {
                 requested.removeValue(forKey: path)
                 currentBadges.removeValue(forKey: path)
+                serviceBadges.removeValue(forKey: path)
+                loadingFolders.removeValue(forKey: path)
+                folderRefreshRequests.removeValue(forKey: path)
             }
         }
         requestOrder.removeAll { requested[$0] == nil }
@@ -181,6 +198,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
         guard roots.contains(where: { contains(path, in: $0.mountPath) }) else { return }
         if requested[path] == nil { requestOrder.append(path) }
         requested[path] = normalized
+        markParentFoldersLoading(for: path)
         while requestOrder.count > maxTrackedItems {
             let oldest = requestOrder.removeFirst()
             if let discarded = requested.removeValue(forKey: oldest) {
@@ -189,9 +207,14 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 controller.setBadgeIdentifier(Badge.unknown.rawValue, for: discarded)
             }
             currentBadges.removeValue(forKey: oldest)
+            serviceBadges.removeValue(forKey: oldest)
+            loadingFolders.removeValue(forKey: oldest)
+            folderRefreshRequests.removeValue(forKey: oldest)
         }
-        let badge = Date().timeIntervalSince(lastSuccessfulBadges) < 10 ? currentBadges[path] ?? .unknown : .unknown
+        let serviceBadge = Date().timeIntervalSince(lastSuccessfulBadges) < 10 ? serviceBadges[path] ?? .unknown : .unknown
+        let badge = displayBadge(for: path, serviceBadge: serviceBadge)
         controller.setBadgeIdentifier(badge.rawValue, for: normalized)
+        currentBadges[path] = badge
         scheduleRefresh()
     }
 
@@ -371,6 +394,14 @@ final class MountainTurtleFinderSync: FIFinderSync {
             if data == nil {
                 log.error("Folder download action was rejected by the local bridge.")
             } else {
+                if action.mode == "stop" {
+                    self?.serviceBadges[action.path] = .unknown
+                    self?.loadingFolders.removeValue(forKey: action.path)
+                } else {
+                    self?.serviceBadges[action.path] = .downloading
+                    self?.loadingFolders.removeValue(forKey: action.path)
+                }
+                self?.applyDisplayedBadge(for: action.path)
                 self?.scheduleRefresh()
             }
         }
@@ -383,6 +414,65 @@ final class MountainTurtleFinderSync: FIFinderSync {
 
     private func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+    }
+
+    private func markFolderLoading(_ path: String) {
+        guard let root = roots.first(where: { contains(path, in: $0.mountPath) }),
+              path != root.mountPath else { return }
+        loadingFolders[path] = Date().addingTimeInterval(folderLoadingDuration)
+        applyDisplayedBadge(for: path)
+    }
+
+    private func markParentFoldersLoading(for path: String) {
+        guard let root = roots.first(where: { contains(path, in: $0.mountPath) }) else { return }
+        var current = URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL.path
+        while current != root.mountPath && contains(current, in: root.mountPath) {
+            if requested[current] != nil {
+                markFolderLoading(current)
+                requestRemoteFolderRefresh(current)
+            }
+            let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
+            if parent == current { break }
+            current = parent
+        }
+    }
+
+    private func requestRemoteFolderRefresh(_ path: String) {
+        guard roots.contains(where: { contains(path, in: $0.mountPath) }) else { return }
+        let now = Date()
+        if let retryAfter = folderRefreshRequests[path], retryAfter > now { return }
+        folderRefreshRequests[path] = now.addingTimeInterval(folderRemoteRefreshInterval)
+        guard let descriptor = bridge ?? readBridge(),
+              let body = try? JSONSerialization.data(withJSONObject: ["path": path]) else { return }
+        request(path: "v1/folder-refresh", descriptor: descriptor, body: body) { [weak self] _ in
+            self?.scheduleRefresh()
+        }
+    }
+
+    private func displayBadge(for path: String, serviceBadge: Badge) -> Badge {
+        if let until = loadingFolders[path] {
+            if until > Date() { return .loading }
+            loadingFolders.removeValue(forKey: path)
+        }
+        return serviceBadge
+    }
+
+    private func applyDisplayedBadge(for path: String) {
+        guard let url = requested[path] else { return }
+        let badge = displayBadge(for: path, serviceBadge: serviceBadges[path] ?? .unknown)
+        if currentBadges[path] != badge {
+            controller.setBadgeIdentifier(badge.rawValue, for: url)
+            currentBadges[path] = badge
+        }
+    }
+
+    private func pruneExpiredLoadingFolders() {
+        let now = Date()
+        let expired = loadingFolders.compactMap { path, until in until <= now ? path : nil }
+        for path in expired {
+            loadingFolders.removeValue(forKey: path)
+            applyDisplayedBadge(for: path)
+        }
     }
 
     private func scheduleRefresh() {
@@ -429,6 +519,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     }
 
     private func refresh() {
+        pruneExpiredLoadingFolders()
         guard !refreshing else {
             if Date().timeIntervalSince(lastSuccessfulBadges) >= 10 { markUnavailable() }
             return
@@ -446,6 +537,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 self.roots = response.roots.filter { $0.mountPath.hasPrefix("/") && $0.mountPath != "/" }
                 let urls = Set(self.roots.map { URL(fileURLWithPath: $0.mountPath, isDirectory: true) })
                 if urls != self.controller.directoryURLs { self.controller.directoryURLs = urls }
+                for path in self.observed where self.roots.contains(where: { self.contains(path, in: $0.mountPath) }) {
+                    self.requestRemoteFolderRefresh(path)
+                }
                 let removed = self.requested.keys.filter { path in
                     !self.roots.contains(where: { self.contains(path, in: $0.mountPath) })
                 }
@@ -454,6 +548,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
                         self.controller.setBadgeIdentifier("", for: url)
                     }
                     self.currentBadges.removeValue(forKey: path)
+                    self.serviceBadges.removeValue(forKey: path)
+                    self.loadingFolders.removeValue(forKey: path)
+                    self.folderRefreshRequests.removeValue(forKey: path)
                 }
                 self.requestOrder.removeAll { self.requested[$0] == nil }
                 self.refreshBadges(descriptor: descriptor)
@@ -508,7 +605,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
             }
             for path in batch {
                 guard let url = self.requested[path] else { continue }
-                let badge = states[path] ?? .unknown
+                let serviceBadge = states[path] ?? .unknown
+                self.serviceBadges[path] = serviceBadge
+                let badge = self.displayBadge(for: path, serviceBadge: serviceBadge)
                 if self.currentBadges[path] != badge {
                     self.controller.setBadgeIdentifier(badge.rawValue, for: url)
                     self.currentBadges[path] = badge
@@ -522,6 +621,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
         for (path, url) in requested where currentBadges[path] != .unknown {
             controller.setBadgeIdentifier(Badge.unknown.rawValue, for: url)
             currentBadges[path] = .unknown
+            serviceBadges[path] = .unknown
         }
         lastSuccessfulBadges = .distantPast
     }

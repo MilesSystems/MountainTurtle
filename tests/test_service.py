@@ -566,11 +566,39 @@ class ServiceTests(unittest.TestCase):
              patch.object(turtle.subprocess, "Popen") as start:
             supervisor.tick()
             supervisor.tick()
-        refresh.assert_called_once_with(rc)
+        refresh.assert_called_once_with(rc, recursive=True)
         child.send_signal.assert_not_called()
         child.terminate.assert_not_called()
         start.assert_not_called()
         self.assertFalse(self.store.read()["connections"][0]["refreshRequested"])
+
+    def test_finder_folder_refresh_targets_observed_directory_and_throttles(self):
+        supervisor, child = turtle.Supervisor(self.paths), Mock()
+        child.pid, child.poll.return_value = 12345, None
+        rc = {"rcPort": 42000, "rcUser": "metrics", "rcPass": "private", "sessionID": "session"}
+        supervisor.children[self.connection["id"]] = {"process": child, "started": time.time() - 10,
+                                                       "remoteControl": rc}
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        folder = str(self.paths.mounts / self.connection["name"] / "2025" / "Raw")
+        with patch.object(turtle, "mount_table", return_value=mounted), \
+             patch.object(turtle, "start_directory_refresh", return_value={"jobid": 9}) as refresh, \
+             patch.object(turtle.time, "monotonic", side_effect=[100, 105, 121]):
+            self.assertFalse(supervisor.request_folder_refresh({"path": folder})["throttled"])
+            self.assertTrue(supervisor.request_folder_refresh({"path": folder})["throttled"])
+            self.assertFalse(supervisor.request_folder_refresh({"path": folder})["throttled"])
+        self.assertEqual(refresh.call_count, 2)
+        refresh.assert_called_with(rc, "2025/Raw", recursive=False)
+
+    def test_finder_folder_refresh_is_bounded_to_connected_mounts(self):
+        supervisor = turtle.Supervisor(self.paths)
+        folder = str(self.paths.mounts / self.connection["name"] / "2025")
+        with patch.object(turtle, "mount_table", return_value={str(self.paths.mounts / self.connection["name"])}), \
+             patch.object(turtle, "start_directory_refresh") as refresh:
+            result = supervisor.request_folder_refresh({"path": folder})
+        self.assertFalse(result["ok"])
+        refresh.assert_not_called()
+        with patch.object(turtle, "mount_table", return_value=set()), self.assertRaisesRegex(ValueError, "Connect"):
+            supervisor.request_folder_refresh({"path": folder})
 
     def test_reconnect_waits_for_safe_detach_and_previous_process_exit(self):
         with self.store.update() as state:

@@ -39,6 +39,7 @@ EVENT_QUEUE_LIMIT = 100
 EVENT_QUEUE_DISPLAY_LIMIT = 8
 EVENT_AGGREGATE_SECONDS = 30
 EVENT_LOG_READ_LIMIT = 512 * 1024
+FOLDER_REFRESH_MIN_SECONDS = 20
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 ICON_ASSETS = {
@@ -730,8 +731,13 @@ def remote_control_post(remote_control, method, payload, timeout=3):
     return result
 
 
-def start_directory_refresh(remote_control):
-    return remote_control_post(remote_control, "vfs/refresh", {"recursive": True, "_async": True})
+def start_directory_refresh(remote_control, directory=None, recursive=True):
+    payload = {"_async": True}
+    if recursive:
+        payload["recursive"] = True
+    if directory:
+        payload["dir"] = directory
+    return remote_control_post(remote_control, "vfs/refresh", payload)
 
 
 def remote_control_settings():
@@ -1292,6 +1298,7 @@ class Supervisor:
         self.retry, self.failures, self.blocked = {}, {}, {}
         self.revisions = {}
         self.activity_log_cursors = {}
+        self.folder_refreshes = {}
         self.stop_requested = False
         self.update_handoff_token = None
         self.badge_connections = []
@@ -1394,6 +1401,30 @@ class Supervisor:
             raise ValueError("Invalid folder download request")
         return folder_cache_request(self.paths, self.store.read()["connections"], body.get("path"),
                                     body.get("mode"), body.get("seconds"), mounted=mount_table())
+
+    def request_folder_refresh(self, body):
+        if not isinstance(body, dict):
+            raise ValueError("Invalid folder refresh request")
+        connection, relative = _folder_cache_target(self.paths, self.store.read()["connections"],
+                                                    body.get("path"), mounted=mount_table())
+        child = self.children.get(connection["id"])
+        if not child or not child.get("remoteControl"):
+            return {"ok": False, "message": "Connect this drive before refreshing this folder."}
+        now = time.monotonic()
+        key = (connection["id"], relative)
+        previous = self.folder_refreshes.get(key, 0)
+        if now - previous < FOLDER_REFRESH_MIN_SECONDS:
+            return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": True}
+        self.folder_refreshes[key] = now
+        if len(self.folder_refreshes) > 512:
+            keep = dict(sorted(self.folder_refreshes.items(), key=lambda item: item[1])[-384:])
+            self.folder_refreshes = keep
+        try:
+            start_directory_refresh(child["remoteControl"], relative, recursive=False)
+        except Exception:
+            logging.warning("Could not refresh Finder folder listing for %s", connection["id"], exc_info=True)
+            return {"ok": False, "message": "Folder listing refresh is unavailable right now."}
+        return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": False}
 
     def folder_cache_path(self, connection, relative_path):
         parts = _relative_parts(relative_path)
@@ -1703,7 +1734,7 @@ class Supervisor:
                     self.start_sidebar(connection, child)
                 if connection.get("refreshRequested") and now - child["started"] >= 5:
                     try:
-                        start_directory_refresh(child["remoteControl"])
+                        start_directory_refresh(child["remoteControl"], recursive=True)
                     except ProcessLookupError:
                         continue  # The next tick handles the process exit and normal backoff.
                     except Exception:
@@ -1778,7 +1809,8 @@ class Supervisor:
             if at_login:
                 self.restore_login_intent()
             from finder_badges import BadgeBridge
-            bridge = BadgeBridge(self.paths, lambda: self.badge_connections, self.request_folder_cache)
+            bridge = BadgeBridge(self.paths, lambda: self.badge_connections,
+                                 self.request_folder_cache, self.request_folder_refresh)
             try:
                 bridge.start()
             except (OSError, ValueError):

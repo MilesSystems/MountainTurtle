@@ -287,12 +287,21 @@ you browse inside a connected Mountain Turtle volume.
 | Green check | Cached on this Mac; the file's entire contents are cached. |
 | Partial cache | Only part of the file is cached. This does not prove an active transfer. |
 | Blue arrows | Waiting to upload; local changes remain pending. |
+| Spinning arrow | Folder contents are loading after opening a folder row. |
+| Pie circle | A keep-downloaded folder is queued or warming into the local cache. |
 | Unknown | Status is unavailable or cannot be established safely. |
 
 Cached files can be evicted when the cache fills. A green check alone does not
 pin a file for permanent offline access or establish that the remote copy has
 not changed. The extension requests status for visible items using local cache
 metadata; badge checks do not scan remote storage or download photos.
+When a folder disclosure row is opened, Mountain Turtle can briefly show a
+loading badge on that folder while Finder asks for its visible children.
+Opening a folder also asks the mounted drive to refresh that folder's remote
+listing, so deletes or renames made elsewhere can appear without waiting for the
+longer directory cache to expire.
+Folders explicitly marked **Keep This Folder Downloaded** show a pie-style
+progress badge while their cache-warming job is queued or running.
 
 The Turtle toolbar button and contextual menu provide **Browse photos** for S3,
 **Keep This Folder Downloaded**, **Show drive in Finder**, **Refresh folder listings**,
