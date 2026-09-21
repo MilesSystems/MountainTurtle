@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,19 @@ class ServiceTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return path
+
+    def write_network_volumes_permission(self, auth_value, client="io.mountainturtle.app"):
+        database = self.paths.home / "Library/Application Support/com.apple.TCC/TCC.db"
+        database.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "create table if not exists access (service text, client text, client_type integer, "
+                "auth_value integer, last_modified integer)"
+            )
+            connection.execute(
+                "insert into access values (?, ?, ?, ?, ?)",
+                (turtle.NETWORK_VOLUMES_SERVICE, client, 0, auth_value, int(time.time())),
+            )
 
     def sidebar_fixture(self):
         helper = self.paths.resources.parent / "Helpers/Mountain Turtle Sidebar"
@@ -618,6 +632,18 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["privacyState"], "approved")
         self.assertEqual(result["awsVersion"].split()[0], "aws-cli/2.31.35")
         self.assertEqual(result["rcloneVersion"], "rclone v1.75.1")
+
+    def test_dependencies_tcc_approval_overrides_stale_sidebar_error(self):
+        self.write_network_volumes_permission(2)
+        result = turtle.dependencies(self.paths, {"a": {"sidebarError": "Allow Network Volumes"}}, set())
+        self.assertEqual(result["privacyState"], "approved")
+        self.assertIn("Network Volumes is allowed", result["privacyMessage"])
+
+    def test_dependencies_tcc_denial_overrides_stale_sidebar_success(self):
+        self.write_network_volumes_permission(0)
+        result = turtle.dependencies(self.paths, {"a": {"sidebarItemID": 42}}, {"/Volumes/Nikki"})
+        self.assertEqual(result["privacyState"], "needsApproval")
+        self.assertIn("Allow Network Volumes", result["privacyMessage"])
 
     def test_dependencies_reject_aws_v1_and_missing_nfsmount(self):
         def fake_executable(name):

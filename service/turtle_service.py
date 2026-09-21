@@ -16,6 +16,7 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -24,6 +25,8 @@ import uuid
 
 LABEL = "com.mountainturtle.service"
 SERVICE = Path(__file__).resolve()
+APP_BUNDLE_IDENTIFIER = "io.mountainturtle.app"
+NETWORK_VOLUMES_SERVICE = "kTCCServiceSystemPolicyNetworkVolumes"
 CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24}
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
@@ -120,7 +123,45 @@ def installed_application(paths):
     return bundle in expected
 
 
-def privacy_status(runtime, mounted):
+def bundle_identifier(paths):
+    bundle = application_path(paths)
+    if bundle:
+        try:
+            value = plistlib.loads((bundle / "Contents/Info.plist").read_bytes()).get("CFBundleIdentifier")
+            if isinstance(value, str) and value:
+                return value
+        except (OSError, plistlib.InvalidFileException):
+            pass
+    return APP_BUNDLE_IDENTIFIER
+
+
+def network_volumes_permission(paths):
+    database = paths.home / "Library/Application Support/com.apple.TCC/TCC.db"
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1) as connection:
+            row = connection.execute(
+                "select auth_value from access where service = ? and client = ? and client_type = 0 "
+                "order by last_modified desc limit 1",
+                (NETWORK_VOLUMES_SERVICE, bundle_identifier(paths)),
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    if not row:
+        return None
+    if row[0] == 2:
+        return "approved"
+    if row[0] == 0:
+        return "needsApproval"
+    return None
+
+
+def privacy_status(runtime, mounted, paths=None):
+    if paths:
+        permission = network_volumes_permission(paths)
+        if permission == "approved":
+            return {"privacyState": "approved", "privacyMessage": "Network Volumes is allowed in macOS Privacy & Security."}
+        if permission == "needsApproval":
+            return {"privacyState": "needsApproval", "privacyMessage": "Allow Network Volumes for Mountain Turtle in macOS Privacy & Security."}
     live_connections = runtime.values()
     if any(item.get("sidebarItemID") for item in live_connections):
         return {"privacyState": "approved", "privacyMessage": "Finder sidebar access is approved."}
@@ -147,7 +188,7 @@ def dependencies(paths=None, runtime=None, mounted=None):
     if paths:
         app = application_path(paths)
         result.update(appPath=str(app) if app else "", appInstalled=installed_application(paths))
-        result.update(privacy_status(runtime or {}, mounted or set()))
+        result.update(privacy_status(runtime or {}, mounted or set(), paths))
     return result
 
 

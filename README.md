@@ -42,7 +42,8 @@ See [rclone's macOS NFS documentation](https://rclone.org/commands/rclone_nfsmou
 
 On first launch, Mountain Turtle shows a setup checklist for the installed app
 location, rclone's `nfsmount` support, and macOS Network Volumes
-permission. AWS CLI is optional for SFTP-only use. If Homebrew is already
+permission, including the current macOS Privacy & Security toggle when readable.
+AWS CLI is optional for SFTP-only use. If Homebrew is already
 installed, the app can install `rclone` and optionally `awscli`. If Homebrew is missing, Mountain Turtle opens a visible
 Terminal installer that runs Homebrew's official install script and then installs
 the required packages.

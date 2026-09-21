@@ -375,5 +375,6 @@ references the stable service script inside the installed app.
 The setup sheet checks the installed app location, rclone NFS support, AWS CLI
 v2 when needed for S3, and Network Volumes permission. It can install rclone alone
 or include AWS CLI. With no Homebrew, it opens the official Homebrew installer in
-Terminal. Privacy remains unknown until macOS asks or sidebar registration proves
-access; setup does not bypass that permission.
+Terminal. Privacy is read from macOS's current Network Volumes record when
+available, then falls back to sidebar registration evidence; setup does not
+bypass that permission.
