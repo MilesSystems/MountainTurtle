@@ -302,14 +302,19 @@ rclone's local file cache for the Finder view without recursively pinning the
 subtree. The job is best-effort, yields to explicit folder keep-downloaded jobs,
 cancels during shutdown/eject/update handoff, skips symlinks and subfolders, and
 stops when bounded local cache accounting shows the cache near its configured
-limit. Rclone's own cache max-size and minimum-free-space settings remain the
-hard cache constraints.
+limit. If an opened folder changes remotely while prefetch is reading from a
+stale listing, the service stops that pass and lets the next refresh retry from
+fresh metadata. Rclone's own cache max-size and minimum-free-space settings
+remain the hard cache constraints.
 
 The service also maintains `event-queue.json`, a bounded local queue and recent
 operation history for mounted-drive operations. It is populated from rclone's
 local INFO log lines and folder-cache jobs, aggregates bursts such as bulk
 deletes, keeps completed operations as local history, and is exposed through
-`status` as `events`. It is a local UI queue/history, not a provider-wide audit log.
+`status` as `events`. Download/cache-read failures and upload failures are
+classified separately so a remotely deleted object encountered by folder warming
+does not appear as a local upload attempt. It is a local UI queue/history, not a
+provider-wide audit log.
 
 The supervisor runs the bundled `Mountain Turtle Sidebar` helper with
 `ensure UUID MOUNT_PATH` once per confirmed mount generation, with serialized

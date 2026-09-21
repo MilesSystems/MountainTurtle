@@ -304,7 +304,9 @@ also prefetches that folder's direct files in the background so large folders
 become responsive as their contents enter the local cache. This opportunistic
 prefetch is shallow, cancellable, and bounded by the drive's cache settings.
 Folders explicitly marked **Keep This Folder Downloaded** show a pie-style
-progress badge while their cache-warming job is queued or running.
+progress badge while their cache-warming job is queued or running. If files are
+deleted or renamed elsewhere while Mountain Turtle is warming a folder, it backs
+off from that pass and retries later instead of grinding through the stale list.
 
 The Turtle toolbar button and contextual menu provide **Browse photos** for S3,
 **Keep This Folder Downloaded**, **Show drive in Finder**, **Refresh folder listings**,
@@ -318,6 +320,9 @@ The selected drive's **Activity queue & history** shows recent local work with
 icons for move/rename, delete, upload, folder download, and failures. Finder
 folder renames can appear as move operations because remote storage handles them
 that way, and large deletes are grouped into a single counted queue item.
+Download/cache-read failures are tracked separately from upload failures so
+remote deletes encountered during cache warming do not look like local upload
+conflicts.
 Completed operations remain as recent history. This history is local to this
 Mac's mounted drive session; changes made from other computers or cloud consoles
 are not a complete audit trail here.

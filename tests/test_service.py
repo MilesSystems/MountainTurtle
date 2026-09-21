@@ -562,6 +562,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["state"], "limited")
         self.assertEqual(result["bytes"], 2)
 
+    def test_folder_warming_backs_off_when_listed_file_cannot_be_read(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        (folder / "deleted.jpg").write_bytes(b"gone")
+        with patch("builtins.open", side_effect=OSError("object not found")):
+            result = turtle.warm_folder_cache(folder, lambda: False, chunk_bytes=2)
+        self.assertEqual(result["state"], "error")
+        self.assertEqual(result["files"], 0)
+        self.assertEqual(result["errors"], 1)
+        self.assertIn("changed while downloading", result["message"])
+
+    def test_open_folder_prefetch_backs_off_when_listed_file_cannot_be_read(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        (folder / "deleted.jpg").write_bytes(b"gone")
+        with patch("builtins.open", side_effect=OSError("object not found")):
+            result = turtle.warm_open_folder_cache(folder, lambda: False, chunk_bytes=2)
+        self.assertEqual(result["state"], "partial")
+        self.assertEqual(result["files"], 0)
+        self.assertEqual(result["errors"], 1)
+        self.assertIn("changed while prefetching", result["message"])
+
     def test_open_folder_prefetch_cache_guard_uses_configured_limit(self):
         limit = self.connection["cacheMaxSizeMiB"] = 64
         with patch.object(turtle, "cache_info",
@@ -794,6 +816,14 @@ class ServiceTests(unittest.TestCase):
             f"{stamp} ERROR : photo.jpg: vfs cache: failed to upload try #1", self.connection["id"], now=1)
         self.assertEqual(failed["kind"], "upload")
         self.assertEqual(failed["state"], "failed")
+        deleted_remote = turtle.parse_activity_log_line(
+            f"{stamp} ERROR : photo.jpg: vfs cache: too many errors 11/10: last error: vfs reader: failed to write to cache file: object not found",
+            self.connection["id"], now=1)
+        self.assertEqual(deleted_remote["kind"], "download")
+        self.assertEqual(deleted_remote["state"], "failed")
+        self.assertIsNone(turtle.parse_activity_log_line(
+            f"{stamp} ERROR : photo.jpg: vfs cache: failed to download: vfs reader: failed to write to cache file: object not found",
+            self.connection["id"], now=1))
         self.assertIsNone(turtle.parse_activity_log_line(
             f"{stamp} INFO  : ._photo.jpg: Deleted", self.connection["id"], now=1))
 
@@ -816,6 +846,22 @@ class ServiceTests(unittest.TestCase):
              patch.object(turtle, "dependencies", return_value={}):
             result = turtle.status(self.paths)["connections"][0]
         self.assertEqual(result["events"][1]["title"], "Deleted 2 items")
+
+    def test_activity_events_clear_superseded_running_folder_downloads(self):
+        turtle.record_activity_events(self.paths, [
+            {"connectionID": self.connection["id"], "kind": "download", "state": "queued",
+             "path": "Raw", "updatedAt": 100},
+            {"connectionID": self.connection["id"], "kind": "download", "state": "running",
+             "path": "Raw", "updatedAt": 101},
+            {"connectionID": self.connection["id"], "kind": "download", "state": "failed",
+             "path": "Raw", "updatedAt": 102},
+        ], now=102)
+        events = turtle.activity_events(self.paths, self.connection["id"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["state"], "failed")
+        self.assertEqual(events[0]["title"], "Download failed for 1 item")
+        turtle.remove_activity_events(self.paths, self.connection["id"], "download", "Raw", states=("failed",))
+        self.assertEqual(turtle.activity_events(self.paths, self.connection["id"]), [])
 
     def test_activity_log_poll_reads_only_new_rclone_lines(self):
         path = self.paths.logs / (self.connection["id"] + ".log")

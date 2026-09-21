@@ -68,6 +68,8 @@ RCLONE_FILE_ACTIONS = (
     (re.compile(r"^(?P<path>.+?): vfs cache: queuing for upload", re.I), "upload", "running"),
     (re.compile(r"^(?P<path>.+?): vfs cache: upload succeeded", re.I), "upload", "complete"),
 )
+RCLONE_VFS_FAILED_UPLOAD = re.compile(r": vfs cache: .*upload", re.I)
+RCLONE_VFS_FAILED_DOWNLOAD = re.compile(r": vfs cache: too many errors .*vfs reader:", re.I)
 
 
 class Paths:
@@ -822,6 +824,8 @@ def _event_title(kind, state, count):
             return f"Downloading {count} folder" if count == 1 else f"Downloading {count} folders"
         if state == "queued":
             return f"Folder download queued" if count == 1 else f"{count} folder downloads queued"
+        if state == "failed":
+            return f"Download failed for {count} {noun}"
         return f"Folder downloaded" if state == "complete" and count == 1 else f"Folder downloads updated"
     if kind == "refresh":
         return "Folder listings refreshed"
@@ -850,10 +854,13 @@ def parse_activity_log_line(line, connection_id, now=None):
     body, level = match.group("body"), match.group("level")
     timestamp = _event_timestamp(match.group("stamp"), now)
     if level in ("ERROR", "CRITICAL") and "vfs cache:" in body:
+        if not (RCLONE_VFS_FAILED_UPLOAD.search(body) or RCLONE_VFS_FAILED_DOWNLOAD.search(body)):
+            return None
         path = body.split(":", 1)[0]
         if _ignore_activity_path(path):
             return None
-        return {"connectionID": connection_id, "kind": "upload", "state": "failed",
+        kind = "upload" if RCLONE_VFS_FAILED_UPLOAD.search(body) else "download"
+        return {"connectionID": connection_id, "kind": kind, "state": "failed",
                 "path": _sanitize_event_path(path), "count": 1, "updatedAt": timestamp}
     for pattern, kind, state in RCLONE_FILE_ACTIONS:
         action = pattern.match(body)
@@ -921,9 +928,24 @@ def record_activity_events(paths, incoming, now=None):
             prepared.append(event)
     if not prepared:
         return
+    unique = []
+    seen = set()
+    for event in prepared:
+        key = (event["connectionID"], event["kind"], event["state"], event["path"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(event)
     with _activity_update(paths) as state:
         events = state["events"]
-        for event in prepared:
+        for event in unique:
+            if event["state"] in ("running", "complete", "failed"):
+                superseded = {"queued"} if event["state"] == "running" else {"queued", "running"}
+                events = [existing for existing in events
+                          if not (existing["connectionID"] == event["connectionID"]
+                                  and existing["kind"] == event["kind"]
+                                  and existing["state"] in superseded
+                                  and existing.get("path", "") == event["path"])]
             match = None
             for existing in events:
                 if (existing["connectionID"] == event["connectionID"] and existing["kind"] == event["kind"]
@@ -945,6 +967,16 @@ def record_activity_events(paths, incoming, now=None):
                                   "detail": _event_detail(event["path"], count),
                                   "firstAt": event["updatedAt"], "updatedAt": event["updatedAt"]})
         state["events"] = sorted(events, key=lambda item: item["updatedAt"], reverse=True)[:EVENT_QUEUE_LIMIT]
+
+
+def remove_activity_events(paths, connection_id, kind, path="", states=("queued", "running")):
+    path = _sanitize_event_path(path)
+    with _activity_update(paths) as state:
+        state["events"] = [event for event in state["events"]
+                           if not (event["connectionID"] == connection_id
+                                   and event["kind"] == kind
+                                   and event["state"] in states
+                                   and event.get("path", "") == path)]
 
 
 def activity_events(paths, connection_id, limit=EVENT_QUEUE_DISPLAY_LIMIT):
@@ -1193,11 +1225,14 @@ def warm_folder_cache(folder, cancelled, chunk_bytes=FOLDER_CACHE_CHUNK_BYTES):
                     except FileNotFoundError:
                         continue
                     except (OSError, TimeoutError):
-                        errors += 1
+                        return {"state": "error", "files": files, "bytes": downloaded,
+                                "errors": errors + 1,
+                                "message": "Folder contents changed while downloading. Mountain Turtle will retry after Finder refreshes the listing."}
         except FileNotFoundError:
             continue
         except (OSError, TimeoutError):
-            errors += 1
+            return {"state": "error", "files": files, "bytes": downloaded, "errors": errors + 1,
+                    "message": "Folder contents changed while downloading. Mountain Turtle will retry after Finder refreshes the listing."}
     if errors:
         return {"state": "error", "files": files, "bytes": downloaded, "errors": errors,
                 "message": "Some files could not be downloaded. Mountain Turtle will retry."}
@@ -1246,11 +1281,13 @@ def warm_open_folder_cache(folder, cancelled, should_continue=lambda: True,
                 except FileNotFoundError:
                     continue
                 except (OSError, TimeoutError):
-                    errors += 1
+                    return {"state": "partial", "files": files, "bytes": downloaded, "errors": errors + 1,
+                            "message": "Folder contents changed while prefetching."}
     except FileNotFoundError:
         pass
     except (OSError, TimeoutError):
-        errors += 1
+        return {"state": "partial", "files": files, "bytes": downloaded, "errors": errors + 1,
+                "message": "Folder contents changed while prefetching."}
     if errors:
         return {"state": "partial", "files": files, "bytes": downloaded, "errors": errors,
                 "message": "Some files could not be prefetched."}
@@ -1670,6 +1707,9 @@ class Supervisor:
             return record
 
         folder_cache_update_record(self.paths, key, update)
+        if state == "cancelled":
+            remove_activity_events(self.paths, connection["id"], "download", key[1])
+            return
         record_activity_events(self.paths, [{"connectionID": connection["id"], "kind": "download",
                                              "state": event_state, "path": key[1], "updatedAt": finished}])
 
