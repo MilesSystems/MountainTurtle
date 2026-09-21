@@ -21,6 +21,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -30,6 +31,9 @@ SERVICE = Path(__file__).resolve()
 APP_BUNDLE_IDENTIFIER = "io.mountainturtle.app"
 NETWORK_VOLUMES_SERVICE = "kTCCServiceSystemPolicyNetworkVolumes"
 CACHE_DEFAULTS = {"cacheMaxSizeMiB": 2048, "cacheMaxAgeHours": 24, "fastBrowsing": False}
+FOLDER_CACHE_FILE = "folder-cache.json"
+FOLDER_CACHE_CHUNK_BYTES = 1024 * 1024
+FOLDER_CACHE_MAX_SECONDS = 8760 * 3600
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 ICON_ASSETS = {
@@ -755,6 +759,260 @@ def tail_error(connection, paths):
     return ""
 
 
+class FolderCacheCancelled(Exception):
+    pass
+
+
+def _absolute_parts(path):
+    if not isinstance(path, str) or not path.startswith("/") or "\0" in path:
+        raise ValueError("Choose a folder inside a connected Mountain Turtle drive")
+    parts = path.split("/")[1:]
+    if parts and parts[-1] == "":
+        parts.pop()
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("Choose a folder inside a connected Mountain Turtle drive")
+    return parts
+
+
+def _relative_parts(path):
+    if path == "":
+        return []
+    if not isinstance(path, str) or path.startswith("/") or "\0" in path:
+        raise ValueError("The saved folder download request is invalid")
+    parts = path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("The saved folder download request is invalid")
+    return parts
+
+
+def _folder_cache_path(paths):
+    return paths.base / FOLDER_CACHE_FILE
+
+
+def _read_folder_cache(paths):
+    try:
+        value = read_json(_folder_cache_path(paths), {"version": 1, "folders": []})
+    except (OSError, ValueError, TypeError):
+        value = {"version": 1, "folders": []}
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("folders"), list):
+        return {"version": 1, "folders": []}
+    return value
+
+
+@contextlib.contextmanager
+def _folder_cache_update(paths):
+    paths.prepare()
+    with (paths.base / "folder-cache.lock").open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        value = _read_folder_cache(paths)
+        yield value
+        write_json(_folder_cache_path(paths), value)
+
+
+def _folder_cache_key(record):
+    if not isinstance(record, dict):
+        raise ValueError("The saved folder download request is invalid")
+    return (record.get("connectionID"), record.get("relativePath", ""))
+
+
+def _folder_cache_target(paths, connections, requested_path, mounted=None):
+    requested = _absolute_parts(requested_path)
+    if mounted is None:
+        mounted = mount_table()
+    matches = []
+    for connection in connections:
+        try:
+            mount_path = str(paths.mounts / connection["name"])
+            root = _absolute_parts(mount_path)
+            if requested[:len(root)] == root:
+                matches.append((len(root), root, mount_path, connection))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not matches:
+        raise ValueError("Choose a folder inside a connected Mountain Turtle drive")
+    _, root, mount_path, connection = max(matches, key=lambda item: item[0])
+    if mount_path not in mounted:
+        raise ValueError("Connect this drive before keeping a folder downloaded")
+    return connection, "/".join(requested[len(root):])
+
+
+def folder_cache_request(paths, connections, requested_path, mode, seconds=None, mounted=None, now=None):
+    now = time.time() if now is None else now
+    if mode not in ("forever", "temporary", "stop"):
+        raise ValueError("Choose how long to keep this folder downloaded")
+    if mode == "temporary":
+        if type(seconds) is not int or not 3600 <= seconds <= FOLDER_CACHE_MAX_SECONDS:
+            raise ValueError("Choose a folder download time between 1 hour and 1 year")
+        keep_until = now + seconds
+    else:
+        if seconds is not None:
+            raise ValueError("Folder download time is available only for timed requests")
+        keep_until = None
+    connection, relative = _folder_cache_target(paths, connections, requested_path, mounted)
+    key = (connection["id"], relative)
+    with _folder_cache_update(paths) as state:
+        existing = None
+        folders = []
+        for record in state["folders"]:
+            try:
+                if not isinstance(record, dict):
+                    raise ValueError("Invalid folder download request")
+                _relative_parts(record.get("relativePath", ""))
+                record_key = _folder_cache_key(record)
+            except ValueError:
+                continue
+            if record_key == key:
+                existing = dict(record)
+            else:
+                folders.append(record)
+        if mode != "stop":
+            folders.append({
+                "connectionID": connection["id"],
+                "relativePath": relative,
+                "keepUntil": keep_until,
+                "createdAt": existing.get("createdAt", now) if existing else now,
+                "updatedAt": now,
+                "refreshAfter": 0,
+                "state": "queued",
+                "message": "Folder download queued.",
+            })
+        state["folders"] = folders
+    action = "stopped" if mode == "stop" else "queued"
+    return {"ok": True, "action": action, "connectionID": connection["id"], "relativePath": relative}
+
+
+def folder_cache_records(paths, connections, now=None):
+    now = time.time() if now is None else now
+    known = {connection.get("id") for connection in connections}
+    with _folder_cache_update(paths) as state:
+        folders, changed = [], False
+        for record in state["folders"]:
+            try:
+                if not isinstance(record, dict):
+                    raise ValueError("Invalid folder download request")
+                connection_id = record.get("connectionID")
+                relative = record.get("relativePath", "")
+                _relative_parts(relative)
+                keep_until = record.get("keepUntil")
+                if connection_id not in known:
+                    changed = True
+                    continue
+                if keep_until is not None and (type(keep_until) not in (int, float) or keep_until <= now):
+                    changed = True
+                    continue
+                if type(record.get("refreshAfter", 0)) not in (int, float):
+                    record = dict(record, refreshAfter=0)
+                    changed = True
+                folders.append(record)
+            except ValueError:
+                changed = True
+        if changed:
+            state["folders"] = folders
+        return [dict(record) for record in folders]
+
+
+def folder_cache_update_record(paths, key, updater):
+    with _folder_cache_update(paths) as state:
+        folders = []
+        for record in state["folders"]:
+            try:
+                record_key = _folder_cache_key(record)
+            except ValueError:
+                continue
+            if record_key == key:
+                replacement = updater(dict(record))
+                if replacement is not None:
+                    folders.append(replacement)
+            else:
+                folders.append(record)
+        state["folders"] = folders
+
+
+def folder_cache_job_current(paths, key, job_id):
+    try:
+        state = _read_folder_cache(paths)
+        now = time.time()
+        for record in state["folders"]:
+            if (_folder_cache_key(record) == key and record.get("jobID") == job_id
+                    and (record.get("keepUntil") is None or record.get("keepUntil") > now)):
+                return True
+    except (OSError, TypeError, ValueError):
+        pass
+    return False
+
+
+def folder_cache_cancelled(paths, key, job_id):
+    last_check, current = 0, True
+
+    def cancelled():
+        nonlocal last_check, current
+        now = time.monotonic()
+        if now - last_check >= 0.5:
+            current = folder_cache_job_current(paths, key, job_id)
+            last_check = now
+        return not current
+
+    return cancelled
+
+
+def warm_folder_cache(folder, cancelled, chunk_bytes=FOLDER_CACHE_CHUNK_BYTES):
+    folder = Path(folder)
+    if cancelled():
+        raise FolderCacheCancelled()
+    try:
+        info = os.lstat(folder)
+    except OSError as error:
+        raise ValueError("The selected folder is no longer available") from error
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("Choose a folder to keep downloaded")
+    files, downloaded, errors = 0, 0, 0
+    directories = [folder]
+    while directories:
+        if cancelled():
+            raise FolderCacheCancelled()
+        directory = directories.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if cancelled():
+                        raise FolderCacheCancelled()
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            with open(entry.path, "rb", buffering=0) as handle:
+                                while True:
+                                    if cancelled():
+                                        raise FolderCacheCancelled()
+                                    chunk = handle.read(chunk_bytes)
+                                    if not chunk:
+                                        break
+                                    downloaded += len(chunk)
+                            files += 1
+                    except FileNotFoundError:
+                        continue
+                    except (OSError, TimeoutError):
+                        errors += 1
+        except FileNotFoundError:
+            continue
+        except (OSError, TimeoutError):
+            errors += 1
+    if errors:
+        return {"state": "error", "files": files, "bytes": downloaded, "errors": errors,
+                "message": "Some files could not be downloaded. Mountain Turtle will retry."}
+    return {"state": "complete", "files": files, "bytes": downloaded, "errors": 0,
+            "message": "Folder downloaded into the local cache."}
+
+
+def folder_cache_next_refresh(connection, now, keep_until):
+    age_seconds = cache_settings(connection)["cacheMaxAgeHours"] * 3600
+    interval = max(300, min(age_seconds / 2, 12 * 3600))
+    refresh_after = now + interval
+    return min(refresh_after, keep_until) if keep_until is not None else refresh_after
+
+
 def pending_writes(connection, paths):
     """Inspect only rclone's local metadata, never the mounted or remote tree."""
     if connection["readOnly"]:
@@ -848,6 +1106,7 @@ class Supervisor:
         self.update_handoff_token = None
         self.badge_connections = []
         self.sidebar_processes, self.sidebar_results = {}, {}
+        self.folder_jobs = {}
 
     def record(self, connection, state, message="", pid=None):
         rc = self.children.get(connection["id"], {}).get("remoteControl", {})
@@ -939,6 +1198,94 @@ class Supervisor:
             except (OSError, subprocess.TimeoutExpired):
                 logging.warning("Could not reap sidebar helper for %s", identity)
         self.sidebar_processes.clear()
+
+    def request_folder_cache(self, body):
+        if not isinstance(body, dict):
+            raise ValueError("Invalid folder download request")
+        return folder_cache_request(self.paths, self.store.read()["connections"], body.get("path"),
+                                    body.get("mode"), body.get("seconds"), mounted=mount_table())
+
+    def folder_cache_path(self, connection, relative_path):
+        parts = _relative_parts(relative_path)
+        path = self.paths.mounts / connection["name"]
+        for part in parts:
+            path /= part
+        return path
+
+    def start_folder_cache_job(self, connection, record):
+        key = _folder_cache_key(record)
+        if key in self.folder_jobs:
+            return
+        job_id = str(uuid.uuid4())
+        started = time.time()
+
+        def mark_running(current):
+            if current.get("refreshAfter", 0) > started:
+                return current
+            current.update(state="warming", message="Downloading folder into the local cache.",
+                           jobID=job_id, startedAt=started)
+            return current
+
+        folder_cache_update_record(self.paths, key, mark_running)
+        if not folder_cache_job_current(self.paths, key, job_id):
+            return
+        current = dict(record, jobID=job_id)
+
+        def worker():
+            try:
+                result = warm_folder_cache(self.folder_cache_path(connection, current.get("relativePath", "")),
+                                           folder_cache_cancelled(self.paths, key, job_id))
+            except FolderCacheCancelled:
+                result = {"state": "cancelled"}
+            except Exception as error:
+                result = {"state": "error", "files": 0, "bytes": 0, "errors": 1,
+                          "message": str(error) if isinstance(error, ValueError)
+                          else "The folder download stopped. Mountain Turtle will retry."}
+            self.finish_folder_cache_job(connection, key, job_id, result)
+
+        thread = threading.Thread(target=worker, name="Mountain Turtle folder download", daemon=True)
+        self.folder_jobs[key] = thread
+        thread.start()
+
+    def finish_folder_cache_job(self, connection, key, job_id, result):
+        finished = time.time()
+
+        def update(record):
+            if record.get("jobID") != job_id:
+                return record
+            for field in ("jobID", "startedAt"):
+                record.pop(field, None)
+            keep_until = record.get("keepUntil")
+            if keep_until is not None and keep_until <= finished:
+                return None
+            if result.get("state") == "cancelled":
+                return record
+            record.update(state=result.get("state", "error"),
+                          message=result.get("message", "The folder download stopped. Mountain Turtle will retry."),
+                          files=result.get("files", 0), bytes=result.get("bytes", 0),
+                          errors=result.get("errors", 0), lastRunAt=finished)
+            if record["state"] == "complete":
+                record["refreshAfter"] = folder_cache_next_refresh(connection, finished, keep_until)
+            else:
+                record["refreshAfter"] = finished + 300
+            return record
+
+        folder_cache_update_record(self.paths, key, update)
+
+    def poll_folder_cache(self, connections, mounts, now):
+        for key, thread in list(self.folder_jobs.items()):
+            if not thread.is_alive():
+                self.folder_jobs.pop(key, None)
+        if self.folder_jobs:
+            return
+        by_id = {connection["id"]: connection for connection in connections}
+        for record in folder_cache_records(self.paths, connections, now):
+            connection = by_id.get(record.get("connectionID"))
+            if not connection or str(self.paths.mounts / connection["name"]) not in mounts:
+                continue
+            if record.get("refreshAfter", 0) <= now:
+                self.start_folder_cache_job(connection, record)
+                return
 
     def publish(self):
         write_json(self.paths.base / "runtime.json",
@@ -1033,6 +1380,7 @@ class Supervisor:
         mounts = mount_table()
         now = time.time()
         self.poll_sidebars(state["connections"], mounts)
+        self.poll_folder_cache(state["connections"], mounts, now)
         for connection in state["connections"]:
             identity = connection["id"]
             reconnecting = connection.get("reconnectRequested", False) and connection.get("desiredConnected", False)
@@ -1186,7 +1534,7 @@ class Supervisor:
             if at_login:
                 self.restore_login_intent()
             from finder_badges import BadgeBridge
-            bridge = BadgeBridge(self.paths, lambda: self.badge_connections)
+            bridge = BadgeBridge(self.paths, lambda: self.badge_connections, self.request_folder_cache)
             try:
                 bridge.start()
             except (OSError, ValueError):

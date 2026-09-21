@@ -483,6 +483,75 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse((self.paths.cache / self.connection["id"]).exists())
         self.assertEqual(self.store.read()["connections"][0]["bucket"], self.connection["bucket"])
 
+    def test_folder_cache_request_records_timer_and_stop_removes_rule(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        result = turtle.folder_cache_request(self.paths, [self.connection], str(folder),
+                                             "temporary", seconds=86400, mounted=mounted, now=100)
+        self.assertEqual(result["action"], "queued")
+        records = turtle.folder_cache_records(self.paths, [self.connection], now=100)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["connectionID"], self.connection["id"])
+        self.assertEqual(records[0]["relativePath"], "Needs-Review")
+        self.assertEqual(records[0]["keepUntil"], 86500)
+        self.assertEqual(records[0]["state"], "queued")
+        self.assertEqual(turtle.folder_cache_records(self.paths, [self.connection], now=86501), [])
+        turtle.folder_cache_request(self.paths, [self.connection], str(folder), "forever", mounted=mounted, now=200)
+        turtle.folder_cache_request(self.paths, [self.connection], str(folder), "stop", mounted=mounted, now=201)
+        self.assertEqual(turtle.folder_cache_records(self.paths, [self.connection], now=201), [])
+
+    def test_folder_cache_request_rejects_unmounted_outside_and_bad_duration(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        with self.assertRaisesRegex(ValueError, "Connect"):
+            turtle.folder_cache_request(self.paths, [self.connection], str(folder), "forever", mounted=set())
+        with self.assertRaisesRegex(ValueError, "inside"):
+            turtle.folder_cache_request(self.paths, [self.connection], str(self.paths.home / "Other"),
+                                        "forever", mounted=mounted)
+        with self.assertRaisesRegex(ValueError, "between 1 hour and 1 year"):
+            turtle.folder_cache_request(self.paths, [self.connection], str(folder),
+                                        "temporary", seconds=60, mounted=mounted)
+
+    def test_folder_cache_records_prune_malformed_items(self):
+        path = self.paths.base / turtle.FOLDER_CACHE_FILE
+        path.write_text(json.dumps({"version": 1, "folders": [
+            1,
+            {"connectionID": self.connection["id"], "relativePath": "Needs-Review", "refreshAfter": "soon"},
+            {"connectionID": "removed", "relativePath": "Old"}
+        ]}))
+        records = turtle.folder_cache_records(self.paths, [self.connection], now=100)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["refreshAfter"], 0)
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["folders"], records)
+
+    def test_folder_cache_worker_reads_regular_files_without_following_links(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        nested = folder / "Nested"
+        nested.mkdir(parents=True)
+        (folder / "a.txt").write_bytes(b"abcdef")
+        (nested / "b.txt").write_bytes(b"ghi")
+        (folder / "linked").symlink_to(nested, target_is_directory=True)
+        result = turtle.warm_folder_cache(folder, lambda: False, chunk_bytes=2)
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["files"], 2)
+        self.assertEqual(result["bytes"], 9)
+
+    def test_folder_cache_poll_starts_due_mounted_rule_only(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        turtle.folder_cache_request(self.paths, [self.connection], str(folder), "forever",
+                                    mounted=mounted, now=100)
+        supervisor = turtle.Supervisor(self.paths)
+        with patch.object(supervisor, "start_folder_cache_job") as start:
+            supervisor.poll_folder_cache([self.connection], set(), 100)
+            start.assert_not_called()
+            supervisor.poll_folder_cache([self.connection], mounted, 100)
+            start.assert_called_once()
+
     def test_refresh_warms_directory_cache_without_remount_or_file_downloads(self):
         with self.store.update() as state:
             state["connections"][0].update(desiredConnected=True, refreshRequested=True)

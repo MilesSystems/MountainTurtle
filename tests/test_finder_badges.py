@@ -160,8 +160,8 @@ class BadgeTests(unittest.TestCase):
         self.cache(self.complete(), namespace="s3/" + self.connection["bucket"])
         self.assertEqual(self.state(), "cached")
 
-    def bridge(self):
-        bridge = badges.BadgeBridge(self.paths, lambda: [dict(self.connection)]).start()
+    def bridge(self, folder_requester=None):
+        bridge = badges.BadgeBridge(self.paths, lambda: [dict(self.connection)], folder_requester).start()
         self.addCleanup(bridge.stop)
         return bridge
 
@@ -291,6 +291,23 @@ class BadgeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(response, {"badges": [{"path": paths[0], "state": "cached"},
                                                {"path": paths[1], "state": "online"}]})
+
+    def test_bridge_accepts_bounded_folder_cache_requests(self):
+        seen = []
+        bridge = self.bridge(lambda body: seen.append(body) or {"ok": True, "action": "queued"})
+        request = {"path": self.root + "/Needs-Review", "mode": "temporary", "seconds": 86400}
+        status, response = self.request(bridge, "POST", "/v1/folder-cache", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(response, {"ok": True, "action": "queued"})
+        self.assertEqual(seen, [request])
+
+    def test_bridge_rejects_folder_cache_when_unavailable_or_invalid(self):
+        bridge = self.bridge()
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-cache",
+                                      {"path": self.root, "mode": "forever"})[0], 503)
+        bridge = self.bridge(lambda _body: (_ for _ in ()).throw(ValueError("bad folder")))
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-cache",
+                                      {"path": self.root, "mode": "forever"})[0], 400)
 
     def test_bridge_rejects_unbounded_or_invalid_batches(self):
         bridge = self.bridge()

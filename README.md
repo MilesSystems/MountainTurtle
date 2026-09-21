@@ -289,23 +289,33 @@ you browse inside a connected Mountain Turtle volume.
 | Blue arrows | Waiting to upload; local changes remain pending. |
 | Unknown | Status is unavailable or cannot be established safely. |
 
-Cached files can be evicted when the cache fills. A green check does not pin a
-file for permanent offline access or establish that the remote copy has not
-changed. The extension requests status for visible items using local cache
-metadata; it does not scan remote storage or download photos to generate badges.
+Cached files can be evicted when the cache fills. A green check alone does not
+pin a file for permanent offline access or establish that the remote copy has
+not changed. The extension requests status for visible items using local cache
+metadata; badge checks do not scan remote storage or download photos.
 
 The Turtle toolbar button and contextual menu provide **Browse photos** for S3,
-**Show drive in Finder**, **Refresh folder listings**, **Reconnect**, **Drive insights**,
-**Download & cache settings**, **Rename drive**, and **Eject**. If the toolbar
-button is hidden, right-click Finder's toolbar, choose **Customize Toolbar**,
-and add Mountain Turtle. Rename and cache changes safely eject and reconnect
-when needed; busy files or pending uploads can prevent the change.
+**Keep This Folder Downloaded**, **Show drive in Finder**, **Refresh folder listings**,
+**Reconnect**, **Drive insights**, **Download & cache settings**, **Rename drive**,
+and **Eject**. If the toolbar button is hidden, right-click Finder's toolbar,
+choose **Customize Toolbar**, and add Mountain Turtle. Rename and cache changes
+safely eject and reconnect when needed; busy files or pending uploads can prevent
+the change.
 
 ## Files, caching, and disconnecting
 
 File contents are fetched on demand and cached on this Mac. A connected volume
 is not a complete offline copy, and Finder previews can trigger downloads.
 Remote latency and valid server credentials still matter for files that are not cached.
+
+Right-click a folder in a connected Mountain Turtle drive and choose **Keep This
+Folder Downloaded** to recursively read its files into the local mount cache. You
+can keep the folder refreshed indefinitely, keep it for 24 hours, 7 days, or 30
+days, or stop keeping it downloaded. Disconnecting pauses folder warming until
+the drive is connected again. Stopping a keep rule does not delete already cached
+files; they age out under the drive's cache settings. This is mount-cache warming,
+not a durable archive: the cache size and free-space safeguards can still evict
+data, and Mountain Turtle will retry while the rule remains active.
 
 Finder shows the remote file's modification time. For S3, rclone reads the saved
 modification time from object metadata, falling back to the S3 last-modified

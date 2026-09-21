@@ -267,6 +267,22 @@ The authenticated Finder bridge's `/roots` result includes `supportsPhotoBrowser
 per root. The extension hides its photo action for SFTP; metrics remain available.
 Bridge tokens and filesystem paths are not accepted through deep links.
 
+The same authenticated Finder bridge accepts `POST /v1/folder-cache` from the
+Finder extension only. The JSON body is:
+
+```json
+{"path":"/absolute/selected/folder","mode":"forever"}
+{"path":"/absolute/selected/folder","mode":"temporary","seconds":86400}
+{"path":"/absolute/selected/folder","mode":"stop"}
+```
+
+The service validates that the absolute path is lexically inside a mounted saved
+drive, stores a per-folder keep rule in `folder-cache.json`, and warms one folder
+at a time by reading regular files through the mount. Symlinks are not followed.
+Timed rules expire automatically; `stop` removes the rule without deleting
+already cached files. Folder warming is paused while a drive is disconnected and
+is retried while the rule remains active.
+
 The supervisor runs the bundled `Mountain Turtle Sidebar` helper with
 `ensure UUID MOUNT_PATH` once per confirmed mount generation, with serialized
 work, an eight-second deadline, and cancellation on ejection. Failure does not

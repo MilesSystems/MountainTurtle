@@ -1,6 +1,6 @@
-"""On-demand Finder badges from local rclone cache metadata only.
+"""On-demand Finder badges and folder cache requests for the Finder extension.
 
-This bridge never opens the mounted path, enumerates a directory, or contacts S3.
+Badge requests never open the mounted path, enumerate a directory, or contact S3.
 An rclone cache is evictable: a cached badge is not an offline pin or a promise
 that the object has not changed remotely. Persisted ranges do not prove that a
 transfer is active, so partial files are deliberately not labelled "syncing".
@@ -193,10 +193,11 @@ def badge_for_path(paths, connections, requested_path):
 
 
 class BadgeBridge:
-    """One bounded worker serves authenticated read-only local badge requests."""
+    """One bounded worker serves authenticated local Finder extension requests."""
 
-    def __init__(self, paths, state_reader):
+    def __init__(self, paths, state_reader, folder_requester=None):
         self.paths, self.state_reader = paths, state_reader
+        self.folder_requester = folder_requester
         self.directory = paths.base / "Finder"
         self.config = self.directory / "bridge.json"
         self.token = secrets.token_urlsafe(32)
@@ -274,7 +275,7 @@ class BadgeBridge:
             def do_POST(self):
                 if not self.authorized():
                     return
-                if self.path != "/v1/badges":
+                if self.path not in ("/v1/badges", "/v1/folder-cache"):
                     self.reply(404, {"error": "Not found"})
                     return
                 lengths = self.headers.get_all("Content-Length", [])
@@ -296,16 +297,22 @@ class BadgeBridge:
                     if len(raw) != length:
                         raise ValueError("Incomplete request")
                     body = json.loads(raw)
-                    requested = body.get("paths") if isinstance(body, dict) else None
-                    if (not isinstance(requested, list) or len(requested) > MAX_PATHS
-                            or any(not isinstance(path, str) for path in requested)):
-                        raise ValueError("Invalid requested paths")
-                    connections = bridge.connections()
-                    badges = [{"path": path, "state": badge_for_path(bridge.paths, connections, path)}
-                              for path in requested]
-                    self.reply(200, {"badges": badges})
+                    if self.path == "/v1/badges":
+                        requested = body.get("paths") if isinstance(body, dict) else None
+                        if (not isinstance(requested, list) or len(requested) > MAX_PATHS
+                                or any(not isinstance(path, str) for path in requested)):
+                            raise ValueError("Invalid requested paths")
+                        connections = bridge.connections()
+                        badges = [{"path": path, "state": badge_for_path(bridge.paths, connections, path)}
+                                  for path in requested]
+                        self.reply(200, {"badges": badges})
+                    else:
+                        if bridge.folder_requester is None:
+                            self.reply(503, {"error": "Folder downloads unavailable"})
+                            return
+                        self.reply(200, bridge.folder_requester(body))
                 except (ValueError, UnicodeError, TypeError):
-                    self.reply(400, {"error": "Invalid requested paths"})
+                    self.reply(400, {"error": "Invalid request"})
                 except (OSError, TimeoutError):
                     self.reply(408, {"error": "Request did not complete"})
                 except Exception:

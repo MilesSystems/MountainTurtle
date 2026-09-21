@@ -37,6 +37,11 @@ private struct BadgeResponse: Decodable {
     struct Item: Decodable { let path: String; let state: String }
     let badges: [Item]
 }
+private struct FolderCacheAction {
+    let path: String
+    let mode: String
+    let seconds: Int?
+}
 
 private final class LocalOnlySessionDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -139,6 +144,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var lastSuccessfulBadges = Date.distantPast
     private let maxTrackedItems = 4096
     private var actionURLs: [Int: URL] = [:]
+    private var folderActions: [Int: FolderCacheAction] = [:]
     private var nextActionTag = 1
 
     override init() {
@@ -230,6 +236,10 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 menu.addItem(status)
             }
             menu.addItem(.separator())
+            if selected.count == 1, let url = selected.first, root.mounted, isDirectory(url) {
+                addFolderCacheMenu(for: url, to: menu)
+                menu.addItem(.separator())
+            }
             if root.supportsPhotoBrowser ?? true {
                 addAction("Browse photos…", symbol: "photo.on.rectangle", action: "browse", root: root, to: menu)
             }
@@ -256,6 +266,31 @@ final class MountainTurtleFinderSync: FIFinderSync {
         return menu
     }
 
+    private func addFolderCacheMenu(for url: URL, to menu: NSMenu) {
+        let title = "Keep This Folder Downloaded"
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: title)
+        let submenu = NSMenu(title: title)
+        let path = url.standardizedFileURL.path
+        addFolderAction("Keep Downloaded", symbol: "checkmark.circle", path: path, mode: "forever", seconds: nil, to: submenu)
+        addFolderAction("Keep for 24 Hours", symbol: "clock", path: path, mode: "temporary", seconds: 24 * 60 * 60, to: submenu)
+        addFolderAction("Keep for 7 Days", symbol: "calendar", path: path, mode: "temporary", seconds: 7 * 24 * 60 * 60, to: submenu)
+        addFolderAction("Keep for 30 Days", symbol: "calendar.badge.clock", path: path, mode: "temporary", seconds: 30 * 24 * 60 * 60, to: submenu)
+        submenu.addItem(.separator())
+        addFolderAction("Stop Keeping Downloaded", symbol: "xmark.circle", path: path, mode: "stop", seconds: nil, to: submenu)
+        parent.submenu = submenu
+        menu.addItem(parent)
+    }
+
+    private func addFolderAction(_ title: String, symbol: String, path: String, mode: String, seconds: Int?,
+                                 to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: #selector(requestFolderCache(_:)), keyEquivalent: "")
+        item.target = self
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        registerFolderAction(item, action: FolderCacheAction(path: path, mode: mode, seconds: seconds))
+        menu.addItem(item)
+    }
+
     private func addAction(_ title: String, symbol: String, action: String, root: Root,
                            to menu: NSMenu, enabled: Bool = true) {
         guard UUID(uuidString: root.id) != nil else { return }
@@ -279,8 +314,21 @@ final class MountainTurtleFinderSync: FIFinderSync {
         item.tag = nextActionTag
         actionURLs[nextActionTag] = url
         nextActionTag += 1
-        if actionURLs.count > 256 {
-            for key in actionURLs.keys.sorted().prefix(actionURLs.count - 256) { actionURLs.removeValue(forKey: key) }
+        trimActionMaps()
+    }
+
+    private func registerFolderAction(_ item: NSMenuItem, action: FolderCacheAction) {
+        item.tag = nextActionTag
+        folderActions[nextActionTag] = action
+        nextActionTag += 1
+        trimActionMaps()
+    }
+
+    private func trimActionMaps() {
+        let keys = Set(actionURLs.keys).union(folderActions.keys).sorted()
+        for key in keys.prefix(max(0, keys.count - 256)) {
+            actionURLs.removeValue(forKey: key)
+            folderActions.removeValue(forKey: key)
         }
     }
 
@@ -306,9 +354,35 @@ final class MountainTurtleFinderSync: FIFinderSync {
         }
     }
 
+    @objc private func requestFolderCache(_ sender: NSMenuItem) {
+        let log = Logger(subsystem: "io.mountainturtle.app.findersync", category: "actions")
+        guard let action = folderActions[sender.tag] else {
+            log.error("Folder download action expired before it could be sent.")
+            return
+        }
+        guard let descriptor = readBridge() else {
+            log.error("Folder download action could not find the local bridge.")
+            return
+        }
+        var payload: [String: Any] = ["path": action.path, "mode": action.mode]
+        if let seconds = action.seconds { payload["seconds"] = seconds }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        request(path: "v1/folder-cache", descriptor: descriptor, body: body) { [weak self] data in
+            if data == nil {
+                log.error("Folder download action was rejected by the local bridge.")
+            } else {
+                self?.scheduleRefresh()
+            }
+        }
+    }
+
     private func contains(_ path: String, in directory: String) -> Bool {
         let root = directory.hasSuffix("/") ? String(directory.dropLast()) : directory
         return path == root || path.hasPrefix(root + "/")
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
     }
 
     private func scheduleRefresh() {
