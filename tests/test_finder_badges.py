@@ -185,9 +185,9 @@ class BadgeTests(unittest.TestCase):
         self.cache(self.complete(), namespace="s3/" + self.connection["bucket"])
         self.assertEqual(self.state(), "cached")
 
-    def bridge(self, folder_requester=None, folder_refresher=None):
+    def bridge(self, folder_requester=None, folder_refresher=None, folder_prefetcher=None):
         bridge = badges.BadgeBridge(self.paths, lambda: [dict(self.connection)],
-                                    folder_requester, folder_refresher).start()
+                                    folder_requester, folder_refresher, folder_prefetcher).start()
         self.addCleanup(bridge.stop)
         return bridge
 
@@ -336,6 +336,15 @@ class BadgeTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True, "throttled": False})
         self.assertEqual(seen, [request])
 
+    def test_bridge_accepts_bounded_folder_prefetch_requests(self):
+        seen = []
+        bridge = self.bridge(folder_prefetcher=lambda body: seen.append(body) or {"ok": True, "queued": True})
+        request = {"path": self.root + "/2025/Raw"}
+        status, response = self.request(bridge, "POST", "/v1/folder-prefetch", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(response, {"ok": True, "queued": True})
+        self.assertEqual(seen, [request])
+
     def test_bridge_rejects_folder_cache_when_unavailable_or_invalid(self):
         bridge = self.bridge()
         self.assertEqual(self.request(bridge, "POST", "/v1/folder-cache",
@@ -348,6 +357,12 @@ class BadgeTests(unittest.TestCase):
                                       {"path": self.root})[0], 503)
         bridge = self.bridge(folder_refresher=lambda _body: (_ for _ in ()).throw(ValueError("bad folder")))
         self.assertEqual(self.request(bridge, "POST", "/v1/folder-refresh",
+                                      {"path": self.root})[0], 400)
+        bridge = self.bridge()
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-prefetch",
+                                      {"path": self.root})[0], 503)
+        bridge = self.bridge(folder_prefetcher=lambda _body: (_ for _ in ()).throw(ValueError("bad folder")))
+        self.assertEqual(self.request(bridge, "POST", "/v1/folder-prefetch",
                                       {"path": self.root})[0], 400)
 
     def test_bridge_rejects_unbounded_or_invalid_batches(self):

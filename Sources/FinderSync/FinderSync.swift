@@ -145,6 +145,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var currentBadges: [String: Badge] = [:]
     private var loadingFolders: [String: Date] = [:]
     private var folderRefreshRequests: [String: Date] = [:]
+    private var folderPrefetchRequests: [String: Date] = [:]
     private var bridge: Bridge?
     private var timer: Timer?
     private var refreshing = false
@@ -157,6 +158,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var nextActionTag = 1
     private let folderLoadingDuration: TimeInterval = 6
     private let folderRemoteRefreshInterval: TimeInterval = 20
+    private let folderOpenPrefetchInterval: TimeInterval = 90
 
     override init() {
         super.init()
@@ -173,6 +175,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
         observed.insert(path)
         markFolderLoading(path)
         requestRemoteFolderRefresh(path)
+        requestOpenFolderPrefetch(path)
         scheduleRefresh()
     }
 
@@ -186,6 +189,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 serviceBadges.removeValue(forKey: path)
                 loadingFolders.removeValue(forKey: path)
                 folderRefreshRequests.removeValue(forKey: path)
+                folderPrefetchRequests.removeValue(forKey: path)
             }
         }
         requestOrder.removeAll { requested[$0] == nil }
@@ -210,6 +214,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
             serviceBadges.removeValue(forKey: oldest)
             loadingFolders.removeValue(forKey: oldest)
             folderRefreshRequests.removeValue(forKey: oldest)
+            folderPrefetchRequests.removeValue(forKey: oldest)
         }
         let serviceBadge = Date().timeIntervalSince(lastSuccessfulBadges) < 10 ? serviceBadges[path] ?? .unknown : .unknown
         let badge = displayBadge(for: path, serviceBadge: serviceBadge)
@@ -430,6 +435,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
             if requested[current] != nil {
                 markFolderLoading(current)
                 requestRemoteFolderRefresh(current)
+                requestOpenFolderPrefetch(current)
             }
             let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
             if parent == current { break }
@@ -445,6 +451,18 @@ final class MountainTurtleFinderSync: FIFinderSync {
         guard let descriptor = bridge ?? readBridge(),
               let body = try? JSONSerialization.data(withJSONObject: ["path": path]) else { return }
         request(path: "v1/folder-refresh", descriptor: descriptor, body: body) { [weak self] _ in
+            self?.scheduleRefresh()
+        }
+    }
+
+    private func requestOpenFolderPrefetch(_ path: String) {
+        guard roots.contains(where: { contains(path, in: $0.mountPath) }) else { return }
+        let now = Date()
+        if let retryAfter = folderPrefetchRequests[path], retryAfter > now { return }
+        folderPrefetchRequests[path] = now.addingTimeInterval(folderOpenPrefetchInterval)
+        guard let descriptor = bridge ?? readBridge(),
+              let body = try? JSONSerialization.data(withJSONObject: ["path": path]) else { return }
+        request(path: "v1/folder-prefetch", descriptor: descriptor, body: body) { [weak self] _ in
             self?.scheduleRefresh()
         }
     }
@@ -539,6 +557,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 if urls != self.controller.directoryURLs { self.controller.directoryURLs = urls }
                 for path in self.observed where self.roots.contains(where: { self.contains(path, in: $0.mountPath) }) {
                     self.requestRemoteFolderRefresh(path)
+                    self.requestOpenFolderPrefetch(path)
                 }
                 let removed = self.requested.keys.filter { path in
                     !self.roots.contains(where: { self.contains(path, in: $0.mountPath) })
@@ -551,6 +570,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
                     self.serviceBadges.removeValue(forKey: path)
                     self.loadingFolders.removeValue(forKey: path)
                     self.folderRefreshRequests.removeValue(forKey: path)
+                    self.folderPrefetchRequests.removeValue(forKey: path)
                 }
                 self.requestOrder.removeAll { self.requested[$0] == nil }
                 self.refreshBadges(descriptor: descriptor)

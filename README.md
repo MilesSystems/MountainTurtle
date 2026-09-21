@@ -299,7 +299,10 @@ When a folder disclosure row is opened, Mountain Turtle can briefly show a
 loading badge on that folder while Finder asks for its visible children.
 Opening a folder also asks the mounted drive to refresh that folder's remote
 listing, so deletes or renames made elsewhere can appear without waiting for the
-longer directory cache to expire.
+longer directory cache to expire. While the folder remains open, Mountain Turtle
+also prefetches that folder's direct files in the background so large folders
+become responsive as their contents enter the local cache. This opportunistic
+prefetch is shallow, cancellable, and bounded by the drive's cache settings.
 Folders explicitly marked **Keep This Folder Downloaded** show a pie-style
 progress badge while their cache-warming job is queued or running.
 

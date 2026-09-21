@@ -540,6 +540,39 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["files"], 2)
         self.assertEqual(result["bytes"], 9)
 
+    def test_open_folder_prefetch_reads_direct_files_only(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        nested = folder / "Nested"
+        nested.mkdir(parents=True)
+        (folder / "a.txt").write_bytes(b"abcdef")
+        (nested / "b.txt").write_bytes(b"ghi")
+        (folder / "linked").symlink_to(nested, target_is_directory=True)
+        result = turtle.warm_open_folder_cache(folder, lambda: False, chunk_bytes=2)
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(result["bytes"], 6)
+
+    def test_open_folder_prefetch_stops_when_cache_limit_is_reached(self):
+        folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
+        folder.mkdir(parents=True)
+        (folder / "a.txt").write_bytes(b"abcdef")
+        checks = iter([True, True, False])
+        result = turtle.warm_open_folder_cache(folder, lambda: False, lambda: next(checks, False),
+                                               chunk_bytes=2)
+        self.assertEqual(result["state"], "limited")
+        self.assertEqual(result["bytes"], 2)
+
+    def test_open_folder_prefetch_cache_guard_uses_configured_limit(self):
+        limit = self.connection["cacheMaxSizeMiB"] = 64
+        with patch.object(turtle, "cache_info",
+                          return_value={"ok": True, "usedBytes": int(limit * 1024 * 1024 * 0.95),
+                                        "files": 1, "partial": False}):
+            self.assertFalse(turtle.open_folder_prefetch_cache_available(self.connection, self.paths))
+        with patch.object(turtle, "cache_info",
+                          return_value={"ok": True, "usedBytes": int(limit * 1024 * 1024 * 0.50),
+                                        "files": 1, "partial": False}):
+            self.assertTrue(turtle.open_folder_prefetch_cache_available(self.connection, self.paths))
+
     def test_folder_cache_poll_starts_due_mounted_rule_only(self):
         folder = self.paths.mounts / self.connection["name"] / "Needs-Review"
         folder.mkdir(parents=True)
@@ -552,6 +585,51 @@ class ServiceTests(unittest.TestCase):
             start.assert_not_called()
             supervisor.poll_folder_cache([self.connection], mounted, 100)
             start.assert_called_once()
+
+    def test_finder_open_folder_prefetch_queues_throttles_and_starts_when_idle(self):
+        with self.store.update() as state:
+            state["connections"][0]["desiredConnected"] = True
+        supervisor, child = turtle.Supervisor(self.paths), Mock()
+        child.pid, child.poll.return_value = 12345, None
+        supervisor.children[self.connection["id"]] = {"process": child, "started": time.time() - 10}
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        folder = str(self.paths.mounts / self.connection["name"] / "2025" / "Raw")
+        with patch.object(turtle, "mount_table", return_value=mounted), \
+             patch.object(turtle.time, "monotonic", side_effect=[100, 105, 196]):
+            first = supervisor.request_open_folder_prefetch({"path": folder})
+            second = supervisor.request_open_folder_prefetch({"path": folder})
+            third = supervisor.request_open_folder_prefetch({"path": folder})
+        self.assertTrue(first["queued"])
+        self.assertTrue(second["throttled"])
+        self.assertTrue(third["queued"])
+        self.assertEqual(len(supervisor.open_folder_prefetch_queue), 1)
+        with patch.object(turtle, "open_folder_prefetch_cache_available", return_value=True), \
+             patch.object(supervisor, "start_open_folder_prefetch_job") as start:
+            supervisor.poll_open_folder_prefetch([dict(self.connection, desiredConnected=True)], mounted, False)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[1]["relativePath"], "2025/Raw")
+
+    def test_finder_open_folder_prefetch_waits_for_manual_download_and_cancels_on_shutdown(self):
+        supervisor = turtle.Supervisor(self.paths)
+        mounted = {str(self.paths.mounts / self.connection["name"])}
+        supervisor.open_folder_prefetch_queue.append({
+            "connectionID": self.connection["id"], "relativePath": "2025/Raw", "requestedAt": 100,
+        })
+        durable = Mock()
+        durable.is_alive.return_value = True
+        supervisor.folder_jobs[(self.connection["id"], "Keep")] = durable
+        with patch.object(supervisor, "start_open_folder_prefetch_job") as start:
+            supervisor.poll_open_folder_prefetch([dict(self.connection, desiredConnected=True)], mounted, False)
+        start.assert_not_called()
+        active = Mock()
+        active.is_alive.return_value = True
+        cancel = Mock()
+        supervisor.open_folder_prefetch_job = {
+            "key": (self.connection["id"], "2025/Raw"), "connectionID": self.connection["id"],
+            "path": "2025/Raw", "thread": active, "cancel": cancel,
+        }
+        supervisor.poll_open_folder_prefetch([dict(self.connection, desiredConnected=True)], mounted, True)
+        cancel.set.assert_called_once()
 
     def test_refresh_warms_directory_cache_without_remount_or_file_downloads(self):
         with self.store.update() as state:

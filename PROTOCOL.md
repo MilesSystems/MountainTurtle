@@ -294,6 +294,17 @@ refresh only that directory listing. Requests are throttled per folder. This is
 how Finder can notice files deleted or renamed from another Mac without waiting
 for the normal directory-cache expiry or recursively refreshing the whole drive.
 
+The bridge also accepts `POST /v1/folder-prefetch` with
+`{"path":"/absolute/opened/folder"}`. The service validates that the path is
+inside a mounted saved drive, queues a throttled in-memory job, and reads only
+regular files directly inside that open folder through the mount. This warms
+rclone's local file cache for the Finder view without recursively pinning the
+subtree. The job is best-effort, yields to explicit folder keep-downloaded jobs,
+cancels during shutdown/eject/update handoff, skips symlinks and subfolders, and
+stops when bounded local cache accounting shows the cache near its configured
+limit. Rclone's own cache max-size and minimum-free-space settings remain the
+hard cache constraints.
+
 The service also maintains `event-queue.json`, a bounded local queue and recent
 operation history for mounted-drive operations. It is populated from rclone's
 local INFO log lines and folder-cache jobs, aggregates bursts such as bulk

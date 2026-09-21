@@ -40,6 +40,10 @@ EVENT_QUEUE_DISPLAY_LIMIT = 8
 EVENT_AGGREGATE_SECONDS = 30
 EVENT_LOG_READ_LIMIT = 512 * 1024
 FOLDER_REFRESH_MIN_SECONDS = 20
+OPEN_FOLDER_PREFETCH_MIN_SECONDS = 90
+OPEN_FOLDER_PREFETCH_QUEUE_LIMIT = 32
+OPEN_FOLDER_PREFETCH_CACHE_FRACTION = 0.92
+OPEN_FOLDER_PREFETCH_CACHE_CHECK_SECONDS = 5
 SIDEBAR_PERMISSION_TIMEOUT = 60
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 ICON_ASSETS = {
@@ -1201,6 +1205,59 @@ def warm_folder_cache(folder, cancelled, chunk_bytes=FOLDER_CACHE_CHUNK_BYTES):
             "message": "Folder downloaded into the local cache."}
 
 
+def warm_open_folder_cache(folder, cancelled, should_continue=lambda: True,
+                           chunk_bytes=FOLDER_CACHE_CHUNK_BYTES):
+    """Best-effort prefetch for an open Finder folder; direct files only."""
+    folder = Path(folder)
+    if cancelled():
+        return {"state": "cancelled", "files": 0, "bytes": 0, "errors": 0}
+    try:
+        info = os.lstat(folder)
+    except OSError as error:
+        raise ValueError("The opened folder is no longer available") from error
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("Choose a folder to prefetch")
+    files, downloaded, errors = 0, 0, 0
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if cancelled():
+                    return {"state": "cancelled", "files": files, "bytes": downloaded, "errors": errors}
+                if not should_continue():
+                    return {"state": "limited", "files": files, "bytes": downloaded, "errors": errors,
+                            "message": "Open-folder prefetch paused because the cache is near its limit."}
+                try:
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    with open(entry.path, "rb", buffering=0) as handle:
+                        while True:
+                            if cancelled():
+                                return {"state": "cancelled", "files": files, "bytes": downloaded,
+                                        "errors": errors}
+                            if not should_continue():
+                                return {"state": "limited", "files": files, "bytes": downloaded,
+                                        "errors": errors,
+                                        "message": "Open-folder prefetch paused because the cache is near its limit."}
+                            chunk = handle.read(chunk_bytes)
+                            if not chunk:
+                                break
+                            downloaded += len(chunk)
+                    files += 1
+                except FileNotFoundError:
+                    continue
+                except (OSError, TimeoutError):
+                    errors += 1
+    except FileNotFoundError:
+        pass
+    except (OSError, TimeoutError):
+        errors += 1
+    if errors:
+        return {"state": "partial", "files": files, "bytes": downloaded, "errors": errors,
+                "message": "Some files could not be prefetched."}
+    return {"state": "complete", "files": files, "bytes": downloaded, "errors": 0,
+            "message": "Open folder prefetched into the local cache."}
+
+
 def folder_cache_next_refresh(connection, now, keep_until):
     age_seconds = cache_settings(connection)["cacheMaxAgeHours"] * 3600
     interval = max(300, min(age_seconds / 2, 12 * 3600))
@@ -1262,6 +1319,20 @@ def cache_info(connection, paths, max_entries=10000, max_seconds=0.25):
     return result
 
 
+def open_folder_prefetch_cache_available(connection, paths):
+    limit = cache_settings(connection)["cacheMaxSizeMiB"] * 1024 * 1024
+    try:
+        info = cache_info(connection, paths, max_entries=20000, max_seconds=0.5)
+    except (OSError, ValueError):
+        # If bounded local accounting is temporarily unavailable, let rclone's
+        # own vfs-cache max-size/min-free-space limits remain the authority.
+        return True
+    if info.get("partial"):
+        return True
+    used = info.get("usedBytes")
+    return type(used) in (int, float) and used < limit * OPEN_FOLDER_PREFETCH_CACHE_FRACTION
+
+
 def clear_cache(connection, paths):
     root = paths.cache / connection["id"]
     if paths.cache.is_symlink() or root.is_symlink():
@@ -1299,6 +1370,9 @@ class Supervisor:
         self.revisions = {}
         self.activity_log_cursors = {}
         self.folder_refreshes = {}
+        self.open_folder_prefetches = {}
+        self.open_folder_prefetch_queue = []
+        self.open_folder_prefetch_job = None
         self.stop_requested = False
         self.update_handoff_token = None
         self.badge_connections = []
@@ -1426,12 +1500,111 @@ class Supervisor:
             return {"ok": False, "message": "Folder listing refresh is unavailable right now."}
         return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": False}
 
+    def request_open_folder_prefetch(self, body):
+        if not isinstance(body, dict):
+            raise ValueError("Invalid folder prefetch request")
+        connection, relative = _folder_cache_target(self.paths, self.store.read()["connections"],
+                                                    body.get("path"), mounted=mount_table())
+        if connection["id"] not in self.children:
+            return {"ok": False, "message": "Connect this drive before prefetching this folder."}
+        now = time.monotonic()
+        key = (connection["id"], relative)
+        previous = self.open_folder_prefetches.get(key, 0)
+        if now - previous < OPEN_FOLDER_PREFETCH_MIN_SECONDS:
+            return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": True}
+        self.open_folder_prefetches[key] = now
+        if len(self.open_folder_prefetches) > 512:
+            self.open_folder_prefetches = dict(sorted(self.open_folder_prefetches.items(),
+                                                     key=lambda item: item[1])[-384:])
+        self.open_folder_prefetch_queue = [
+            item for item in self.open_folder_prefetch_queue
+            if (item.get("connectionID"), item.get("relativePath", "")) != key
+        ]
+        self.open_folder_prefetch_queue.append({
+            "connectionID": connection["id"], "relativePath": relative, "requestedAt": time.time(),
+        })
+        self.open_folder_prefetch_queue = self.open_folder_prefetch_queue[-OPEN_FOLDER_PREFETCH_QUEUE_LIMIT:]
+        return {"ok": True, "connectionID": connection["id"], "relativePath": relative,
+                "queued": True, "throttled": False}
+
     def folder_cache_path(self, connection, relative_path):
         parts = _relative_parts(relative_path)
         path = self.paths.mounts / connection["name"]
         for part in parts:
             path /= part
         return path
+
+    def start_open_folder_prefetch_job(self, connection, record):
+        key = (connection["id"], record.get("relativePath", ""))
+        if self.open_folder_prefetch_job is not None:
+            return
+        cancel = threading.Event()
+        last_cache_check, allowed = 0, True
+
+        def should_continue():
+            nonlocal last_cache_check, allowed
+            if cancel.is_set():
+                return False
+            now = time.monotonic()
+            if now - last_cache_check >= OPEN_FOLDER_PREFETCH_CACHE_CHECK_SECONDS:
+                last_cache_check = now
+                allowed = open_folder_prefetch_cache_available(connection, self.paths)
+            return allowed
+
+        def worker():
+            try:
+                result = warm_open_folder_cache(self.folder_cache_path(connection, record.get("relativePath", "")),
+                                                cancel.is_set, should_continue)
+            except Exception as error:
+                result = {"state": "error", "files": 0, "bytes": 0, "errors": 1,
+                          "message": str(error) if isinstance(error, ValueError)
+                          else "Open-folder prefetch stopped."}
+            self.finish_open_folder_prefetch_job(key, result)
+
+        thread = threading.Thread(target=worker, name="Mountain Turtle open folder prefetch", daemon=True)
+        self.open_folder_prefetch_job = {"key": key, "connectionID": connection["id"], "path": key[1],
+                                         "thread": thread, "cancel": cancel}
+        thread.start()
+
+    def finish_open_folder_prefetch_job(self, key, result):
+        job = self.open_folder_prefetch_job
+        if job and job.get("key") == key:
+            job["result"] = result
+
+    def poll_open_folder_prefetch(self, connections, mounts, shutdown):
+        by_id = {connection["id"]: connection for connection in connections}
+        job = self.open_folder_prefetch_job
+        if job:
+            connection = by_id.get(job.get("connectionID"))
+            mounted = bool(connection and str(self.paths.mounts / connection["name"]) in mounts)
+            if (shutdown or self.stop_requested or self.folder_jobs or not connection
+                    or not connection.get("desiredConnected", False) or not mounted):
+                job["cancel"].set()
+            if job["thread"].is_alive():
+                return
+            result = job.get("result", {})
+            if result.get("state") == "complete":
+                logging.info("Open-folder prefetch complete for %s (%s files, %s bytes)",
+                             job.get("path"), result.get("files", 0), result.get("bytes", 0))
+            elif result.get("state") in ("limited", "cancelled"):
+                logging.info("Open-folder prefetch %s for %s", result.get("state"), job.get("path"))
+            elif result:
+                logging.warning("Open-folder prefetch finished with %s for %s",
+                                result.get("state", "error"), job.get("path"))
+            self.open_folder_prefetch_job = None
+        if shutdown or self.stop_requested or self.folder_jobs:
+            return
+        while self.open_folder_prefetch_queue:
+            record = self.open_folder_prefetch_queue.pop(0)
+            connection = by_id.get(record.get("connectionID"))
+            if not connection or not connection.get("desiredConnected", False):
+                continue
+            if str(self.paths.mounts / connection["name"]) not in mounts:
+                continue
+            if not open_folder_prefetch_cache_available(connection, self.paths):
+                continue
+            self.start_open_folder_prefetch_job(connection, record)
+            return
 
     def start_folder_cache_job(self, connection, record):
         key = _folder_cache_key(record)
@@ -1655,6 +1828,7 @@ class Supervisor:
         now = time.time()
         self.poll_sidebars(state["connections"], mounts)
         self.poll_folder_cache(state["connections"], mounts, now)
+        self.poll_open_folder_prefetch(state["connections"], mounts, state.get("shutdown", False))
         self.poll_activity_logs(state["connections"], now)
         for connection in state["connections"]:
             identity = connection["id"]
@@ -1810,7 +1984,8 @@ class Supervisor:
                 self.restore_login_intent()
             from finder_badges import BadgeBridge
             bridge = BadgeBridge(self.paths, lambda: self.badge_connections,
-                                 self.request_folder_cache, self.request_folder_refresh)
+                                 self.request_folder_cache, self.request_folder_refresh,
+                                 self.request_open_folder_prefetch)
             try:
                 bridge.start()
             except (OSError, ValueError):

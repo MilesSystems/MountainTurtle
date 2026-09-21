@@ -230,10 +230,12 @@ def badge_for_path(paths, connections, requested_path):
 class BadgeBridge:
     """One bounded worker serves authenticated local Finder extension requests."""
 
-    def __init__(self, paths, state_reader, folder_requester=None, folder_refresher=None):
+    def __init__(self, paths, state_reader, folder_requester=None, folder_refresher=None,
+                 folder_prefetcher=None):
         self.paths, self.state_reader = paths, state_reader
         self.folder_requester = folder_requester
         self.folder_refresher = folder_refresher
+        self.folder_prefetcher = folder_prefetcher
         self.directory = paths.base / "Finder"
         self.config = self.directory / "bridge.json"
         self.token = secrets.token_urlsafe(32)
@@ -311,7 +313,8 @@ class BadgeBridge:
             def do_POST(self):
                 if not self.authorized():
                     return
-                if self.path not in ("/v1/badges", "/v1/folder-cache", "/v1/folder-refresh"):
+                if self.path not in ("/v1/badges", "/v1/folder-cache", "/v1/folder-refresh",
+                                     "/v1/folder-prefetch"):
                     self.reply(404, {"error": "Not found"})
                     return
                 lengths = self.headers.get_all("Content-Length", [])
@@ -348,6 +351,11 @@ class BadgeBridge:
                                 self.reply(503, {"error": "Folder refresh unavailable"})
                                 return
                             self.reply(200, bridge.folder_refresher(body))
+                        elif self.path == "/v1/folder-prefetch":
+                            if bridge.folder_prefetcher is None:
+                                self.reply(503, {"error": "Folder prefetch unavailable"})
+                                return
+                            self.reply(200, bridge.folder_prefetcher(body))
                         elif bridge.folder_requester is None:
                             self.reply(503, {"error": "Folder downloads unavailable"})
                             return
