@@ -690,8 +690,6 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
                "--noappledouble", "--noapplexattr", "--umask", "077",
                "--file-perms", "0600", "--dir-perms", "0700",
                "--filter", "+ /._.", "--filter", "+ /._.VolumeIcon.icns",
-               "--filter", "- .DS_Store", "--filter", "- ._*",
-               "--filter", "- .Spotlight-V100/**", "--filter", "- .Trashes/**",
                "--vfs-cache-mode", "full", "--cache-dir", str(paths.cache / identity),
                "--vfs-cache-max-size", f'{cache["cacheMaxSizeMiB"]}Mi', "--vfs-cache-min-free-space", "20Gi",
                "--vfs-cache-max-age", f'{cache["cacheMaxAgeHours"]}h', "--vfs-write-back", "5s",
@@ -704,6 +702,8 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
     if fast_s3_browsing:
         command += ["--use-server-modtime", "--fast-list", "--vfs-refresh", "--attr-timeout", "10s"]
     if connection["readOnly"]:
+        command += ["--filter", "- .DS_Store", "--filter", "- ._*",
+                    "--filter", "- .Spotlight-V100/**", "--filter", "- .Trashes/**"]
         command += ["--read-only", "-o", "ro"]
     if rc_port is not None:
         command += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]

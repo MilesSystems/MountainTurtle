@@ -356,6 +356,24 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("--use-server-modtime", command)
         self.assertNotIn("--vfs-used-is-size", command)
 
+    def test_writable_mounts_do_not_hide_remote_sidecar_files(self):
+        command = turtle.mount_command(self.connection, self.paths, "/rclone", "sftp:/photos")
+        filters = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--filter"]
+        self.assertIn("+ /._.", filters)
+        self.assertIn("+ /._.VolumeIcon.icns", filters)
+        self.assertNotIn("- .DS_Store", filters)
+        self.assertNotIn("- ._*", filters)
+        self.assertNotIn("- .Spotlight-V100/**", filters)
+        self.assertNotIn("- .Trashes/**", filters)
+
+    def test_read_only_mounts_hide_remote_sidecar_files(self):
+        command = turtle.mount_command({**self.connection, "readOnly": True}, self.paths, "/rclone", "sftp:/photos")
+        filters = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--filter"]
+        self.assertIn("- .DS_Store", filters)
+        self.assertIn("- ._*", filters)
+        self.assertIn("- .Spotlight-V100/**", filters)
+        self.assertIn("- .Trashes/**", filters)
+
     def test_icon_overlay_is_materialized_from_package_safe_assets(self):
         assets = self.paths.resources / "icon-overlay-assets"
         assets.mkdir(parents=True)
