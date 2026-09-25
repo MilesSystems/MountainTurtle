@@ -13,7 +13,10 @@ swift scripts/generate-icons.swift "$PWD/Resources"
 `AppIcon.icns` is the app icon. `TurtleDocument.icns` is the `.turtle` and
 `.mountainturtle` document icon. `appIcon.png`, `turtleDocument.png`,
 `s3Drive.png`, and `sftpDrive.png` are previews. `S3Drive.icns` and
-`SFTPDrive.icns` label Finder volumes with their connection protocol.
+`SFTPDrive.icns` label Finder volumes with their connection protocol. The ICNS
+files intentionally omit the 1x 16px PNG slot because macOS can corrupt that
+slot in save/open panel location menus; those menus scale cleanly from the 32px
+entries instead.
 
 The read-only `icon-overlay` (S3) and `icon-overlay-sftp` (SFTP) each contain
 `.VolumeIcon.icns` and two raw AppleDouble records. Separate directories keep

@@ -170,7 +170,35 @@ func drawDocumentIcon() {
     color(0x9FC1A7, alpha: 0.8).setStroke(); page.lineWidth = 5; page.stroke()
 }
 
-func drawDriveIcon(label: String) {
+func driveAccent(_ label: String) -> (NSColor, NSColor) {
+    label == "SFTP" ? (color(0x2B7EBE), color(0x154765)) : (color(0x2B7C67), color(0x174D42))
+}
+
+func drawMenuDriveIcon(label: String) {
+    let (accent, accentDark) = driveAccent(label)
+    let body = NSBezierPath(roundedRect: NSRect(x: 116, y: 201, width: 792, height: 564), xRadius: 132, yRadius: 132)
+    NSGraphicsContext.saveGraphicsState()
+    shadow(22, -11, 0.22); color(0xDDE8E0).setFill(); body.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGradient(starting: color(0xF4F7EF), ending: color(0x9EAFA6))!.draw(in: body, angle: -90)
+
+    let top = NSBezierPath(roundedRect: NSRect(x: 156, y: 566, width: 712, height: 150), xRadius: 76, yRadius: 76)
+    NSGradient(starting: accent, ending: accentDark)!.draw(in: top, angle: -90)
+
+    let slot = NSBezierPath(roundedRect: NSRect(x: 220, y: 328, width: 358, height: 68), xRadius: 34, yRadius: 34)
+    color(0x4C6259).setFill(); slot.fill()
+    ellipse(NSRect(x: 722, y: 309, width: 128, height: 128), color(0x4DD789))
+    ellipse(NSRect(x: 760, y: 369, width: 30, height: 30), color(0xDBFFE9))
+
+    color(0xFDFBF2, alpha: 0.55).setStroke(); body.lineWidth = 24; body.stroke()
+}
+
+func drawDriveIcon(label: String, size: Int) {
+    if size <= 32 {
+        drawMenuDriveIcon(label: label)
+        return
+    }
+
     let front = NSBezierPath(roundedRect: NSRect(x: 130, y: 151, width: 764, height: 203), xRadius: 59, yRadius: 59)
     NSGraphicsContext.saveGraphicsState()
     shadow(26, -12, 0.27); cream.setFill(); front.fill()
@@ -206,16 +234,30 @@ func drawDriveIcon(label: String) {
     ellipse(NSRect(x: 803, y: 218, width: 7, height: 7), color(0xDBFFE9))
 }
 
+func png(size: Int, draw: (Int) -> Void) -> Data {
+    let bytesPerRow = size * 4
+    var pixels = Data(repeating: 0, count: bytesPerRow * size)
+    var image: CGImage?
+    let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+    pixels.withUnsafeMutableBytes { buffer in
+        guard let baseAddress = buffer.baseAddress,
+              let context = CGContext(data: baseAddress, width: size, height: size,
+                                      bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: bitmapInfo) else { return }
+        context.clear(CGRect(x: 0, y: 0, width: size, height: size))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        let scaling = NSAffineTransform(); scaling.scale(by: CGFloat(size) / 1024); scaling.concat()
+        draw(size)
+        NSGraphicsContext.restoreGraphicsState()
+        image = context.makeImage()
+    }
+    return NSBitmapImageRep(cgImage: image!).representation(using: .png, properties: [:])!
+}
+
 func png(size: Int, draw: () -> Void) -> Data {
-    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
-                                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
-    let scaling = NSAffineTransform(); scaling.scale(by: CGFloat(size) / 1024); scaling.concat()
-    draw()
-    NSGraphicsContext.restoreGraphicsState()
-    return bitmap.representation(using: .png, properties: [:])!
+    png(size: size) { _ in draw() }
 }
 
 func appendBigEndian(_ value: UInt32, to data: inout Data) {
@@ -230,9 +272,10 @@ func appendFourCC(_ value: String, to data: inout Data) {
     data.append(contentsOf: value.utf8)
 }
 
-func writeIcns(name: String, at output: URL, draw: () -> Void) throws {
+func writeIcns(name: String, at output: URL, draw: (Int) -> Void) throws {
     let entries = [
-        ("icp4", 16),
+        // Omit the 1x 16px PNG slot: IconServices can corrupt PNG-backed icp4
+        // entries in system menus, while scaling from the 32px slots is clean.
         ("ic11", 32),
         ("icp5", 32),
         ("ic12", 64),
@@ -257,9 +300,17 @@ func writeIcns(name: String, at output: URL, draw: () -> Void) throws {
     try icon.write(to: output.appendingPathComponent("\(name).icns"))
 }
 
-func writeIcon(name: String, preview: String, at output: URL, draw: () -> Void) throws {
+func writeIcns(name: String, at output: URL, draw: () -> Void) throws {
+    try writeIcns(name: name, at: output) { _ in draw() }
+}
+
+func writeIcon(name: String, preview: String, at output: URL, draw: (Int) -> Void) throws {
     try png(size: 1024, draw: draw).write(to: output.appendingPathComponent(preview))
     try writeIcns(name: name, at: output, draw: draw)
+}
+
+func writeIcon(name: String, preview: String, at output: URL, draw: () -> Void) throws {
+    try writeIcon(name: name, preview: preview, at: output) { _ in draw() }
 }
 
 // AppleDouble entry 9 stores FinderInfo. kHasCustomIcon is 0x0400 on the
@@ -302,7 +353,7 @@ for (label, name, preview, directory) in [
     ("S3", "S3Drive", "s3Drive.png", "icon-overlay-assets"),
     ("SFTP", "SFTPDrive", "sftpDrive.png", "icon-overlay-assets-sftp"),
 ] {
-    try writeIcon(name: name, preview: preview, at: output) { drawDriveIcon(label: label) }
+    try writeIcon(name: name, preview: preview, at: output) { size in drawDriveIcon(label: label, size: size) }
     let overlay = output.appendingPathComponent(directory, isDirectory: true)
     try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
     try Data(contentsOf: output.appendingPathComponent("\(name).icns")).write(to: overlay.appendingPathComponent("VolumeIcon.icns"))
