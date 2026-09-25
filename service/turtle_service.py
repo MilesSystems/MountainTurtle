@@ -70,6 +70,7 @@ RCLONE_FILE_ACTIONS = (
 )
 RCLONE_VFS_FAILED_UPLOAD = re.compile(r": vfs cache: .*upload", re.I)
 RCLONE_VFS_FAILED_DOWNLOAD = re.compile(r": vfs cache: too many errors .*vfs reader:", re.I)
+RCLONE_DIR_NOT_EMPTY = re.compile(r"^(?P<path>.+?)/?: Dir\.Remove not empty$", re.I)
 
 
 class Paths:
@@ -877,6 +878,64 @@ def parse_activity_log_line(line, connection_id, now=None):
         return {"connectionID": connection_id, "kind": kind, "state": state,
                 "path": _sanitize_event_path(path), "count": 1, "updatedAt": timestamp}
     return None
+
+
+def metadata_only_delete_path(line):
+    match = RCLONE_LOG_LINE.match(line.strip())
+    if not match or match.group("level") not in ("ERROR", "CRITICAL"):
+        return None
+    failure = RCLONE_DIR_NOT_EMPTY.match(match.group("body"))
+    if not failure:
+        return None
+    path = failure.group("path").rstrip("/")
+    try:
+        _relative_parts(path)
+    except ValueError:
+        return None
+    return path or None
+
+
+def finish_metadata_only_delete(mount_root, relative_path):
+    """Finish a failed Finder rmdir only when macOS sidecars are all that remain."""
+    try:
+        parts = _relative_parts(relative_path)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    directory = Path(mount_root).joinpath(*parts)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        handle = os.open(directory, flags)
+    except OSError:
+        return False
+    try:
+        names = os.listdir(handle)
+        if any(name != ".DS_Store" and not name.startswith("._") for name in names):
+            return False
+        for name in names:
+            info = os.stat(name, dir_fd=handle, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+        for name in names:
+            os.unlink(name, dir_fd=handle)
+    except OSError:
+        return False
+    finally:
+        os.close(handle)
+    try:
+        os.rmdir(directory)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    sidecar = directory.parent / ("._" + directory.name)
+    try:
+        if stat.S_ISREG(os.lstat(sidecar).st_mode):
+            os.unlink(sidecar)
+    except OSError:
+        pass
+    return True
 
 
 def _normalize_activity_events(value):
@@ -1762,6 +1821,11 @@ class Supervisor:
             lines = data.decode(errors="replace").splitlines()
             events = [event for event in (parse_activity_log_line(line, identity, now) for line in lines) if event]
             record_activity_events(self.paths, events, now)
+            if connection_backend(connection) == "sftp" and not connection.get("readOnly", True):
+                candidates = dict.fromkeys(filter(None, (metadata_only_delete_path(line) for line in lines)))
+                for relative in candidates:
+                    if finish_metadata_only_delete(self.paths.mounts / connection["name"], relative):
+                        logging.info("Completed Finder removal after deleting macOS metadata for %s", identity)
             self.activity_log_cursors[identity] = {"inode": inode, "offset": info.st_size}
 
     def publish(self):

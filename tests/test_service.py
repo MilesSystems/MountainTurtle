@@ -853,6 +853,50 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(turtle.parse_activity_log_line(
             f"{stamp} INFO  : ._photo.jpg: Deleted", self.connection["id"], now=1))
 
+    def test_metadata_only_delete_finishes_failed_finder_rmdir(self):
+        root = Path(self.temp.name) / "mount"
+        target = root / "folder"
+        target.mkdir(parents=True)
+        (target / "._sidecar").write_text("metadata")
+        (target / ".DS_Store").write_text("finder")
+        (root / "._folder").write_text("folder metadata")
+        line = "2026/09/25 10:31:40 ERROR : folder/: Dir.Remove not empty"
+        self.assertEqual(turtle.metadata_only_delete_path(line), "folder")
+        self.assertTrue(turtle.finish_metadata_only_delete(root, "folder"))
+        self.assertFalse(target.exists())
+        self.assertFalse((root / "._folder").exists())
+
+    def test_metadata_only_delete_preserves_every_non_sidecar_entry(self):
+        root = Path(self.temp.name) / "mount"
+        for index, name in enumerate(("ordinary.txt", ".ordinary-hidden", "._metadata-dir")):
+            target = root / f"folder-{index}"
+            target.mkdir(parents=True)
+            (target / "._sidecar").write_text("metadata")
+            entry = target / name
+            entry.mkdir() if name == "._metadata-dir" else entry.write_text("user data")
+            self.assertFalse(turtle.finish_metadata_only_delete(root, target.name))
+            self.assertTrue(entry.exists())
+
+    def test_metadata_only_delete_rejects_untrusted_log_paths(self):
+        stamp = "2026/09/25 10:31:40"
+        for line in (f"{stamp} ERROR : ../outside/: Dir.Remove not empty",
+                     f"{stamp} ERROR : /absolute/: Dir.Remove not empty",
+                     f"{stamp} ERROR : folder/: permission denied",
+                     f"{stamp} INFO  : folder/: Dir.Remove not empty"):
+            self.assertIsNone(turtle.metadata_only_delete_path(line))
+
+    def test_activity_log_poll_completes_only_writable_sftp_metadata_deletes(self):
+        path = self.paths.logs / (self.connection["id"] + ".log")
+        path.write_text("")
+        supervisor = turtle.Supervisor(self.paths)
+        connection = dict(self.connection, backend="sftp", readOnly=False)
+        supervisor.poll_activity_logs([connection], now=100)
+        with path.open("a") as handle:
+            handle.write("2026/09/25 10:31:40 ERROR : folder/: Dir.Remove not empty\n")
+        with patch.object(turtle, "finish_metadata_only_delete", return_value=True) as finish:
+            supervisor.poll_activity_logs([connection], now=101)
+        finish.assert_called_once_with(self.paths.mounts / connection["name"], "folder")
+
     def test_activity_events_are_aggregated_bounded_and_exposed_in_status(self):
         turtle.record_activity_events(self.paths, [
             {"connectionID": self.connection["id"], "kind": "delete", "state": "complete",
