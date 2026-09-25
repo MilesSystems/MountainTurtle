@@ -687,7 +687,7 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
                "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
-               "--noappledouble", "--noapplexattr", "--umask", "077",
+               "--noapplexattr", "--umask", "077",
                "--file-perms", "0600", "--dir-perms", "0700",
                "--filter", "+ /._.", "--filter", "+ /._.VolumeIcon.icns",
                "--vfs-cache-mode", "full", "--cache-dir", str(paths.cache / identity),
@@ -702,9 +702,14 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
     if fast_s3_browsing:
         command += ["--use-server-modtime", "--fast-list", "--vfs-refresh", "--attr-timeout", "10s"]
     if connection["readOnly"]:
+        command += ["--noappledouble"]
         command += ["--filter", "- .DS_Store", "--filter", "- ._*",
                     "--filter", "- .Spotlight-V100/**", "--filter", "- .Trashes/**"]
         command += ["--read-only", "-o", "ro"]
+    elif connection_backend(connection) == "sftp":
+        # rclone defaults this macOS option to true. Disable it so Finder can
+        # list and recursively remove existing AppleDouble and .DS_Store files.
+        command += ["--noappledouble=false"]
     if rc_port is not None:
         command += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]
     return command

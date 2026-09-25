@@ -357,8 +357,10 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("--vfs-used-is-size", command)
 
     def test_writable_mounts_do_not_hide_remote_sidecar_files(self):
-        command = turtle.mount_command(self.connection, self.paths, "/rclone", "sftp:/photos")
+        command = turtle.mount_command({**self.connection, "backend": "sftp"}, self.paths, "/rclone", "sftp:/photos")
         filters = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--filter"]
+        self.assertIn("--noappledouble=false", command)
+        self.assertNotIn("--noappledouble", command)
         self.assertIn("+ /._.", filters)
         self.assertIn("+ /._.VolumeIcon.icns", filters)
         self.assertNotIn("- .DS_Store", filters)
@@ -367,12 +369,18 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("- .Trashes/**", filters)
 
     def test_read_only_mounts_hide_remote_sidecar_files(self):
-        command = turtle.mount_command({**self.connection, "readOnly": True}, self.paths, "/rclone", "sftp:/photos")
+        command = turtle.mount_command({**self.connection, "backend": "sftp", "readOnly": True}, self.paths, "/rclone", "sftp:/photos")
         filters = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--filter"]
+        self.assertIn("--noappledouble", command)
+        self.assertNotIn("--noappledouble=false", command)
         self.assertIn("- .DS_Store", filters)
         self.assertIn("- ._*", filters)
         self.assertIn("- .Spotlight-V100/**", filters)
         self.assertIn("- .Trashes/**", filters)
+
+    def test_writable_s3_mount_keeps_appledouble_suppression(self):
+        command = turtle.mount_command(self.connection, self.paths, "/rclone", "s3:photos")
+        self.assertNotIn("--noappledouble=false", command)
 
     def test_icon_overlay_is_materialized_from_package_safe_assets(self):
         assets = self.paths.resources / "icon-overlay-assets"
