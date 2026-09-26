@@ -265,6 +265,17 @@ final class MountainTurtleFinderSync: FIFinderSync {
             }
             menu.addItem(.separator())
             if selected.count == 1, let url = selected.first, root.mounted, isDirectory(url) {
+                var archiveURL = URLComponents()
+                archiveURL.scheme = "mountainturtle"
+                archiveURL.host = "compress"
+                archiveURL.queryItems = [URLQueryItem(name: "path", value: url.standardizedFileURL.path)]
+                if let target = archiveURL.url {
+                    let item = NSMenuItem(title: "Compress with Mountain Turtle…", action: #selector(openTurtle(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.image = NSImage(systemSymbolName: "doc.zipper", accessibilityDescription: nil)
+                    registerAction(item, url: target)
+                    menu.addItem(item)
+                }
                 addFolderCacheMenu(for: url, to: menu)
                 menu.addItem(.separator())
             }

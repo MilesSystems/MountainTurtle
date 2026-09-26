@@ -527,3 +527,18 @@ for the service boundaries.
 Original project code and artwork are available under the [MIT license](LICENSE).
 External tools and system frameworks retain their own terms; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Compressing a remote folder
+
+In Finder, select a folder on a connected Mountain Turtle drive and choose
+**Compress with Mountain Turtle…** from its context menu. Choose a new `.zip`
+filename on a local disk. The app downloads directly from the remote service,
+then compresses the local copy, avoiding Finder's slow per-file metadata scan
+through the mounted drive. The progress window shows completed files, bytes,
+download speed, and the current phase. Cancel removes the temporary download.
+
+Leave room for both the downloaded folder and the ZIP. Keep the source folder
+unchanged until completion; remote folders are not point-in-time snapshots.
+Pending local uploads must finish before starting. Existing ZIPs are never
+replaced. Copy the finished ZIP to the remote drive if you want it stored there.
+Finder's built-in **Compress** command still uses Finder's own archive workflow.

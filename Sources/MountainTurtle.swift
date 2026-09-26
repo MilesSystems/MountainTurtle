@@ -408,6 +408,14 @@ enum ServiceClient {
         guard url.scheme == "mountainturtle", url.user == nil, url.password == nil,
               url.port == nil, url.fragment == nil else { return }
         if url.host == "open", url.path.isEmpty || url.path == "/" { return }
+        if url.host == "compress", url.path.isEmpty || url.path == "/",
+           let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           parts.queryItems?.count == 1, let item = parts.queryItems?.first,
+           item.name == "path", let path = item.value, path.hasPrefix("/"), !path.contains("\0") {
+            ArchiveController.shared.chooseDestination(for: path)
+            return
+        }
+
         guard url.host == "connection", url.pathComponents.count == 2,
               UUID(uuidString: url.lastPathComponent) != nil,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -1319,7 +1327,11 @@ extension Notification.Name { static let showTurtleWindow = Notification.Name("s
     }
     @objc private func quitApp() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        AppUpdater.shared.terminationReply(for: sender)
+        if ArchiveController.shared.running {
+            ArchiveController.shared.cancel()
+            return .terminateCancel
+        }
+        return AppUpdater.shared.terminationReply(for: sender)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
