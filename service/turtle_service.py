@@ -688,7 +688,11 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
     command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
                "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
-               "--noapplexattr", "--umask", "077",
+               # NFS exposes case-sensitive names. Rclone defaults to case-folded
+               # lookups on macOS, which makes a new name such as "highschool"
+               # resolve to the old "Highschool" during native Finder renames.
+               # Let the remote filesystem, rather than VFS aliases, decide.
+               "--vfs-case-insensitive=false", "--noapplexattr", "--umask", "077",
                "--file-perms", "0600", "--dir-perms", "0700",
                "--filter", "+ /._.", "--filter", "+ /._.VolumeIcon.icns",
                "--vfs-cache-mode", "full", "--cache-dir", str(paths.cache / identity),

@@ -40,6 +40,11 @@ required. The NFS listener binds to `127.0.0.1` and is for this Mac, not a netwo
 file server for other computers. Upstream still labels `nfsmount` experimental.
 See [rclone's macOS NFS documentation](https://rclone.org/commands/rclone_nfsmount/#nfs-mount).
 
+Mounted drives use the remote's filename case rules rather than adding macOS
+case-insensitive aliases. On S3 and case-sensitive SFTP servers, `Highschool` and
+`highschool` are distinct names. This also allows native case-only renames without
+mistaking the new name for an existing destination.
+
 On first launch, Mountain Turtle shows a setup checklist for the installed app
 location, rclone's `nfsmount` support, and macOS Network Volumes
 permission, including the current macOS Privacy & Security toggle when readable.
@@ -57,6 +62,16 @@ the required packages.
 
 Other rclone backends and custom S3-compatible endpoints are not exposed by this
 release's connection editor.
+
+## Report a problem
+
+Open a [GitHub issue](https://github.com/MilesSystems/MountainTurtle/issues/new)
+with your Mountain Turtle and macOS versions, S3 or SFTP connection type, the
+steps that triggered the problem, expected result, and exact error or screenshot.
+For rename problems, include each previous and new name, preserving capitalization.
+Remove private paths and account details from screenshots or log excerpts; do not
+attach credentials or your saved connection files. Logs are in
+`~/Library/Logs/MountainTurtle/`.
 
 ## Build and install
 
