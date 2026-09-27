@@ -25,6 +25,7 @@ REASONS = {
     'connection': 'The connection was interrupted or unavailable.',
     'authentication': 'The server rejected authentication or server identity verification.',
     'busy': 'The item or drive was busy.',
+    'io': 'The filesystem reported an input/output error.',
     'other': 'An operation reported an error without a recognized reason. Raw logs are excluded from shared reports.',
 }
 RULES = [
@@ -38,6 +39,7 @@ RULES = [
     ('authentication', r'authenticat|host key|knownhosts|expiredtoken|sso.*expired'),
     ('connection', r'connection (?:reset|refused|closed|lost)|broken pipe|network is unreachable|unexpected EOF'),
     ('busy', r'resource busy|device busy|\bEBUSY\b'),
+    ('io', r'input/output error|i/o error|\bEIO\b'),
 ]
 OPERATIONS = ('delete', 'move', 'upload', 'download', 'list', 'drive', 'preview', 'read', 'metadata', 'prefetch')
 COVERAGE = ('Captures errors reported in the local drive log. Finder may reject an operation before it reaches '

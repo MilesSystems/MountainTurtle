@@ -4,3 +4,4 @@
 - Capture recent failed operations with their affected item, timestamp and classified reason. Failure history is local, bounded and retained for seven days.
 - Add a report preview, Save report and Send to developer flow. Shared diagnostics use anonymous item labels and exclude credentials, filenames, server details and raw logs; users review and submit their own GitHub issue.
 - Show folder listing jobs, file transfers, app preview requests and folder prefetch in the activity panel, with running status, measured request durations and clearly labelled observed transfer timing. Missing outcomes and old log observations no longer imply an operation is still running.
+- Add Open files & apps for each drive: inspect visible file and folder handles, owning apps, process IDs and read/write access. Identify Mountain Turtle’s own background worker, refresh the bounded snapshot, and show an owning app without terminating it.

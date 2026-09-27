@@ -32,3 +32,14 @@ a busy mounted drive is not bypassed to claim completion.
 Existing credentials and cache roots are preserved. No forced unmount or cache
 removal was used during diagnosis. The report's share action copies the reviewed
 text and opens a GitHub draft; it does not submit a report automatically.
+
+## Open files and owning apps
+
+Open-file inspection uses a current-user, nonblocking lsof scan with a five-second
+read deadline, a 4 MiB output cap and a 200-row display cap. It never recursively
+walks a mounted directory or reads process arguments. Regression tests cover
+exact mount boundaries, access modes, directory and working-directory handles,
+NUL-delimited filenames, duplicate handles, service-lock ownership attribution,
+partial visibility and termination of only a timed-out diagnostic subprocess.
+A live snapshot identified five read-only Finder folder handles on the active
+drive. macOS inspection warnings correctly marked that snapshot partial.

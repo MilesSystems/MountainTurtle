@@ -610,3 +610,11 @@ raw logs, filenames, connection names, server addresses, usernames and credentia
 Review your own description for private information. Save a text file, or copy
 the report and open GitHub to paste and submit it yourself. GitHub issues are
 public; the app does not upload or submit reports automatically.
+
+**Open files & apps** shows current-user file and folder handles on the selected
+drive, owning apps, process IDs and access modes. It identifies Mountain Turtle’s
+background service without inspecting process arguments. Refresh takes a bounded,
+read-only snapshot using lsof’s nonblocking mode; it does not traverse the mounted
+filesystem or stop an app. Missing permissions, inspection warnings and time/size
+limits are marked as partial, and an empty result is not proof that ejection is
+safe. Other users’ processes and short-lived handles may not be visible.

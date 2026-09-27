@@ -588,6 +588,7 @@ struct MainView: View {
     @State private var editing: Connection?
     @State private var removing: Connection?
     @State private var reporting: Connection?
+    @State private var inspectingFiles: Connection?
     @State private var fileDropTargeted = false
     @AppStorage("setupPanelSeenVersion") private var setupPanelSeenVersion = ""
     @Environment(\.openWindow) private var openWindow
@@ -642,6 +643,7 @@ struct MainView: View {
         }
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
         .sheet(isPresented: $showSetup) { SetupView(model: model) { showSetup = false; showAdd = true } }
+        .sheet(item: $inspectingFiles) { OpenFilesView(connection: $0) }
         .sheet(item: $reporting) { FailureReportView(connection: $0) }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
         .sheet(item: $model.transferRequest) { request in
@@ -824,9 +826,14 @@ struct MainView: View {
                     }
                 }
                 UploadStatusView(model: model, connection: connection)
-                Button { reporting = connection } label: {
-                    Label("Failures & reports…", systemImage: "exclamationmark.bubble")
-                }.help("Review failed operations and prepare a report for the developer")
+                HStack {
+                    Button { reporting = connection } label: {
+                        Label("Failures & reports…", systemImage: "exclamationmark.bubble")
+                    }.help("Review failed operations and prepare a report for the developer")
+                    Button { inspectingFiles = connection } label: {
+                        Label("Open files & apps…", systemImage: "doc.text.magnifyingglass")
+                    }.help("See files, folders and apps that may keep this drive busy")
+                }
                 if let message = connection.sidebarError, !message.isEmpty {
                     notice(message, symbol: "sidebar.left", color: .orange)
                 }

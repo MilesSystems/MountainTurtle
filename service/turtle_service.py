@@ -2416,6 +2416,7 @@ def parser():
     commands.add_parser("recover-connections")
     commands.add_parser("failure-report").add_argument("id")
     commands.add_parser("operation-status").add_argument("id")
+    commands.add_parser("open-files").add_argument("id")
     commands.add_parser("export-connection").add_argument("id")
     commands.add_parser("inspect-connection")
     commands.add_parser("export-setup").add_argument("id")
@@ -2501,6 +2502,10 @@ def action(args, paths):
     store = Store(paths)
     if args.command == "status":
         return status(paths)
+    if args.command == "open-files":
+        import open_files
+        connection = find_connection(store.read(), args.id)
+        return open_files.snapshot(paths, connection, store.runtime().get("connections", {}).get(args.id, {}))
     if args.command == "operation-status":
         import operation_activity
         connection = find_connection(store.read(), args.id)

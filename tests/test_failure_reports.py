@@ -32,7 +32,8 @@ class FailureReportTests(unittest.TestCase):
                  ('folder: Dir.Remove not empty', 'delete', 'notEmpty'),
                  ('secret.jpg: Failed to rename: file exists', 'move', 'exists'),
                  ('folder: ReadDir: connection reset', 'list', 'connection'),
-                 ('file: vfs cache: failed upload: quota exceeded', 'upload', 'space')]
+                 ('file: vfs cache: failed upload: quota exceeded', 'upload', 'space'),
+                 ('file: vfs cache: vfs reader: input/output error', 'download', 'io')]
         for line, kind, reason in cases:
             with self.subTest(line=line):
                 event = failures.parse(self.line(line), self.now)
