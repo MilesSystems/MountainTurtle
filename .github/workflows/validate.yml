@@ -27,6 +27,8 @@ jobs:
         run: test "${GITHUB_REF_NAME}" = "v$(cat VERSION)"
       - name: Validate shell scripts
         run: bash -n scripts/build.sh scripts/fetch-sparkle.sh scripts/prepare-release.sh scripts/publish-release.sh
+      - name: Validate bundled mount engine
+        run: python3 scripts/build-mount-engine.py --test --output "$PWD/build/turtle-rclone"
       - name: Run service and native helper tests
         run: python3 -m unittest discover -s tests -v
       - name: Build both Mac architectures
@@ -37,6 +39,7 @@ jobs:
         run: |
           codesign --verify --deep --strict 'build/Mountain Turtle.app'
           lipo 'build/Mountain Turtle.app/Contents/MacOS/Mountain Turtle' -verify_arch arm64 x86_64
+          lipo 'build/Mountain Turtle.app/Contents/Helpers/turtle-rclone' -verify_arch arm64 x86_64
           test -L 'build/Mountain Turtle.app/Contents/Frameworks/Sparkle.framework/Versions/Current'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'build/Mountain Turtle.app/Contents/Info.plist')" = "$(cat VERSION)"
           git diff --exit-code

@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 struct DrivePanel: Identifiable {
-    enum Kind { case settings, rename, photos, metrics, access }
+    enum Kind { case settings, rename, photos, files, metrics, access }
     let id = UUID()
     var connection: Connection
     var kind: Kind

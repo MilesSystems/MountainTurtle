@@ -685,7 +685,9 @@ def mount_command(connection, paths, rclone, remote, rc_port=None):
     # Keep backend modification times: --no-modtime exposes rclone's fixed
     # 2000-01-01 fallback in Finder. Fast S3 browsing deliberately uses server
     # listing mtimes to avoid slower per-object metadata lookups.
-    command = [rclone, "nfsmount", remote, str(paths.mounts / connection["name"]),
+    bundled_engine = paths.resources.parent / "Helpers/turtle-rclone"
+    engine = str(bundled_engine) if bundled_engine.is_file() else rclone
+    command = [engine, "nfsmount", remote, str(paths.mounts / connection["name"]),
                "--config", str(paths.remotes / (identity + ".conf")), "--addr", "127.0.0.1:0",
                "-o", "nfsvers=3", "-o", "noresvport", "-o", "nolocks", "-o", "readahead=0",
                # NFS exposes case-sensitive names. Rclone defaults to case-folded

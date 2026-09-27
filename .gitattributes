@@ -1,0 +1,2 @@
+# Unified patches intentionally prefix context lines with a space.
+mountengine/*.patch -whitespace

@@ -79,10 +79,12 @@ mkdir -p -- "$EXTENSION_PATH/Contents/MacOS" "$APP_PATH/Contents/Helpers"
 HELPER_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Sidebar"
 CREDENTIALS_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Credentials"
 PHOTO_DATES_PATH="$APP_PATH/Contents/Helpers/Mountain Turtle Photo Dates"
+MOUNT_ENGINE_PATH="$APP_PATH/Contents/Helpers/turtle-rclone"
 
 for arch in "${ARCHS[@]}"; do
 ARCH_DIR="$STAGING_DIR/$arch"
 mkdir -p -- "$ARCH_DIR"
+"$PYTHON_BIN" "$PROJECT_DIR/scripts/build-mount-engine.py" --arch "$arch" --output "$ARCH_DIR/mount-engine"
 echo "Building Mountain Turtle $VERSION ($BUILD_VERSION) for $arch, macOS 14 or newer…"
 /usr/bin/xcrun swiftc -O -swift-version 5 -target "$arch-apple-macosx14.0" \
     -sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
@@ -124,6 +126,8 @@ combine_binary finder "$EXTENSION_PATH/Contents/MacOS/Mountain Turtle Finder"
 combine_binary sidebar "$HELPER_PATH"
 combine_binary credentials "$CREDENTIALS_PATH"
 combine_binary photo-dates "$PHOTO_DATES_PATH"
+combine_binary mount-engine "$MOUNT_ENGINE_PATH"
+"$PYTHON_BIN" "$PROJECT_DIR/scripts/build-mount-engine.py" --notices "$APP_PATH/Contents/Resources/MountEngineNotices.txt"
 
 "$PYTHON_BIN" - "$PROJECT_DIR" "$APP_PATH" "$VERSION" "$BUILD_VERSION" <<'PY'
 from pathlib import Path
@@ -256,6 +260,7 @@ SPARKLE_FRAMEWORK="$APP_PATH/Contents/Frameworks/Sparkle.framework"
 /usr/bin/codesign "${SIGN_FLAGS[@]}" "$HELPER_PATH"
 /usr/bin/codesign "${SIGN_FLAGS[@]}" "$CREDENTIALS_PATH"
 /usr/bin/codesign "${SIGN_FLAGS[@]}" "$PHOTO_DATES_PATH"
+/usr/bin/codesign "${SIGN_FLAGS[@]}" "$MOUNT_ENGINE_PATH"
 /usr/bin/codesign "${SIGN_FLAGS[@]}" "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"

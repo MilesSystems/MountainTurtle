@@ -86,7 +86,7 @@ class FinderRenameTests(unittest.TestCase):
         (self.paths.remotes / "fixture.conf").write_text(config)
         self.mount = self.paths.mounts / connection["name"]
         self.mount.mkdir(parents=True)
-        process = subprocess.Popen(turtle.mount_command(connection, self.paths, self.rclone, remote),
+        process = subprocess.Popen(turtle.mount_command(connection, self.paths, str(ROOT / "build/turtle-rclone") if (ROOT / "build/turtle-rclone").is_file() else self.rclone, remote),
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_process, process)
         for _ in range(100):

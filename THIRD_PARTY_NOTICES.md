@@ -163,3 +163,7 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ```
+
+## Bundled mount engine
+
+Mountain Turtle bundles rclone 1.75.1 (MIT) with paged SFTP/VFS listings and concurrent NFS request handling. The small source patches are in `mountengine/paging.patch`. Its pinned Go module dependencies and their license texts are included in `Contents/Resources/MountEngineNotices.txt` in the app. The original upstream licenses remain included there.

@@ -1,0 +1,1018 @@
+--- a/rclone/backend/sftp/sftp.go
++++ b/rclone/backend/sftp/sftp.go
+@@ -1766,54 +1766,59 @@
+ // This should return ErrDirNotFound if the directory isn't
+ // found.
+ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+-	root := f.remotePath(dir)
+-	sftpDir := root
++	err = f.ListP(ctx, dir, func(page fs.DirEntries) error { entries = append(entries, page...); return nil })
++	return
++}
++
++// ListP emits the server's READDIR pages without fetching any file contents.
++func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
++	sftpDir := f.remotePath(dir)
+ 	if sftpDir == "" {
+ 		sftpDir = "."
+ 	}
+ 	c, err := f.getSftpConnection(ctx)
+ 	if err != nil {
+-		return nil, fmt.Errorf("List: %w", err)
+-	}
+-	infos, err := c.sftpClient.ReadDir(sftpDir)
+-	f.putSftpConnection(&c, err)
+-	if err != nil {
+-		if errors.Is(err, os.ErrNotExist) {
+-			return nil, fs.ErrorDirNotFound
+-		}
+-		return nil, fmt.Errorf("error listing %q: %w", dir, err)
+-	}
+-	for _, info := range infos {
+-		remote := path.Join(dir, f.opt.Enc.ToStandardName(info.Name()))
+-		// If file is a symlink (not a regular file is the best cross platform test we can do), do a stat to
+-		// pick up the size and type of the destination, instead of the size and type of the symlink.
+-		if !info.Mode().IsRegular() && !info.IsDir() {
+-			if f.opt.SkipLinks {
+-				// skip non regular file if SkipLinks is set
+-				continue
+-			}
+-			oldInfo := info
+-			info, err = f.stat(ctx, remote)
+-			if err != nil {
+-				if !os.IsNotExist(err) {
+-					fs.Errorf(remote, "stat of non-regular file failed: %v", err)
++		return fmt.Errorf("List: %w", err)
++	}
++	defer func() { f.putSftpConnection(&c, err) }()
++	err = c.sftpClient.ReadDirPages(ctx, sftpDir, func(infos []os.FileInfo) error {
++		var entries fs.DirEntries
++		for _, info := range infos {
++			remote := path.Join(dir, f.opt.Enc.ToStandardName(info.Name()))
++			// If file is a symlink (not a regular file is the best cross platform test we can do), do a stat to
++			// pick up the size and type of the destination, instead of the size and type of the symlink.
++			if !info.Mode().IsRegular() && !info.IsDir() {
++				if f.opt.SkipLinks {
++					// skip non regular file if SkipLinks is set
++					continue
+ 				}
+-				info = oldInfo
+-			}
+-		}
+-		if info.IsDir() {
+-			d := fs.NewDir(remote, info.ModTime())
+-			entries = append(entries, d)
+-		} else {
+-			o := &Object{
+-				fs:     f,
+-				remote: remote,
+-			}
+-			o.setMetadata(info)
+-			entries = append(entries, o)
+-		}
+-	}
+-	return entries, nil
++				oldInfo := info
++				info, err = f.stat(ctx, remote)
++				if err != nil {
++					if !os.IsNotExist(err) {
++						fs.Errorf(remote, "stat of non-regular file failed: %v", err)
++					}
++					info = oldInfo
++				}
++			}
++			if info.IsDir() {
++				d := fs.NewDir(remote, info.ModTime())
++				entries = append(entries, d)
++			} else {
++				o := &Object{
++					fs:     f,
++					remote: remote,
++				}
++				o.setMetadata(info)
++				entries = append(entries, o)
++			}
++		}
++		return callback(entries)
++	})
++	if errors.Is(err, os.ErrNotExist) {
++		return fs.ErrorDirNotFound
++	}
++	return err
+ }
+ 
+ // Put data from <in> into a new remote sftp file object described by <src.Remote()> and <src.ModTime(ctx)>
+--- a/rclone/backend/union/turtle_pages.go
++++ b/rclone/backend/union/turtle_pages.go
+@@ -0,0 +1,76 @@
++package union
++
++import (
++	"context"
++	"errors"
++	"github.com/rclone/rclone/backend/local"
++	"github.com/rclone/rclone/backend/union/upstream"
++	"github.com/rclone/rclone/fs"
++	"strings"
++)
++
++func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
++	fallback := func() error {
++		entries, err := f.List(ctx, dir)
++		if err != nil {
++			return err
++		}
++		return callback(entries)
++	}
++	if len(f.upstreams) != 2 {
++		return fallback()
++	}
++	small, remote := f.upstreams[0], f.upstreams[1]
++	if _, ok := small.Fs.(*local.Fs); !ok || small.IsWritable() || remote.Features().ListP == nil {
++		return fallback()
++	}
++	entries, err := small.List(ctx, dir)
++	if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
++		return err
++	}
++	overlay := make(map[string]upstream.Entry)
++	key := func(s string) string {
++		if f.Features().CaseInsensitive {
++			return strings.ToLower(s)
++		}
++		return s
++	}
++	for _, e := range entries {
++		overlay[key(e.Remote())], _ = small.WrapEntry(e)
++	}
++	err = remote.Features().ListP(ctx, dir, func(page fs.DirEntries) error {
++		combined := make(fs.DirEntries, 0, len(page))
++		for _, e := range page {
++			r, _ := remote.WrapEntry(e)
++			candidates := []upstream.Entry{r}
++			if o, ok := overlay[key(e.Remote())]; ok {
++				candidates = []upstream.Entry{o, r}
++				delete(overlay, key(e.Remote()))
++			}
++			merged, err := f.wrapEntries(candidates...)
++			if err != nil {
++				return err
++			}
++			combined = append(combined, merged)
++		}
++		return callback(combined)
++	})
++	if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
++		return err
++	}
++	if errors.Is(err, fs.ErrorDirNotFound) && len(overlay) == 0 {
++		return err
++	}
++	remaining := make(fs.DirEntries, 0, len(overlay))
++	for _, e := range overlay {
++		merged, err := f.wrapEntries(e)
++		if err != nil {
++			return err
++		}
++		remaining = append(remaining, merged)
++	}
++	if len(remaining) > 0 {
++		return callback(remaining)
++	}
++	return nil
++}
+--- a/rclone/backend/union/union.go
++++ b/rclone/backend/union/union.go
+@@ -1020,8 +1020,8 @@
+ 		}
+ 	}
+ 
+-	// Disable ListP always
+-	features.ListP = nil
++	// Stream the small local overlay plus one remote; other unions use List.
++	features.ListP = f.ListP
+ 
+ 	// show that we wrap other backends
+ 	features.Overlay = true
+--- a/rclone/cmd/serve/nfs/turtle_pages.go
++++ b/rclone/cmd/serve/nfs/turtle_pages.go
+@@ -0,0 +1,29 @@
++//go:build unix
++
++package nfs
++
++import (
++	"context"
++	"github.com/rclone/rclone/vfs"
++	gonfs "github.com/willscott/go-nfs"
++	"os"
++)
++
++func (f *FS) ReadDirPage(ctx context.Context, p string, cookie, verifier uint64) ([]os.FileInfo, uint64, bool, error) {
++	node, err := f.vfs.Stat(f.fullPath(p))
++	if err != nil {
++		return nil, 0, false, err
++	}
++	dir, ok := node.(*vfs.Dir)
++	if !ok {
++		return nil, 0, false, os.ErrInvalid
++	}
++	entries, v, eof, err := dir.ReadDirPage(ctx, cookie, verifier)
++	if err == vfs.ErrListingChanged {
++		return nil, 0, false, &gonfs.NFSStatusError{gonfs.NFSStatusBadCookie, vfs.ErrListingChanged}
++	}
++	for _, e := range entries {
++		setSys(e)
++	}
++	return entries, v, eof, err
++}
+--- a/rclone/fs/list/turtle_pages.go
++++ b/rclone/fs/list/turtle_pages.go
+@@ -0,0 +1,28 @@
++package list
++
++import (
++	"context"
++	"github.com/rclone/rclone/fs"
++	"github.com/rclone/rclone/fs/accounting"
++	"github.com/rclone/rclone/fs/filter"
++)
++
++// DirPages preserves filtering and traversal checks. Sentinel-file filters require a complete list.
++func DirPages(ctx context.Context, f fs.Fs, dir string, callback fs.ListRCallback) error {
++	fi := filter.GetConfig(ctx)
++	if len(fi.Opt.ExcludeFile) > 0 {
++		entries, err := DirSorted(ctx, f, false, dir)
++		if err != nil {
++			return err
++		}
++		return callback(entries)
++	}
++	return listP(ctx, f, dir, func(entries fs.DirEntries) error {
++		accounting.Stats(ctx).Listed(int64(len(entries)))
++		entries, err := filterDir(ctx, entries, false, dir, fi.IncludeObject, fi.IncludeDirectory(ctx, f))
++		if err != nil {
++			return err
++		}
++		return callback(entries)
++	})
++}
+--- a/rclone/vfs/dir.go
++++ b/rclone/vfs/dir.go
+@@ -30,13 +30,15 @@
+ 	f            fs.Fs       // read only
+ 	cleanupTimer *time.Timer // read only: timer to call cacheCleanup
+ 
+-	mu      sync.RWMutex // protects the following
+-	parent  *Dir         // parent, nil for root
+-	path    string
+-	entry   fs.Directory
+-	read    time.Time         // time directory entry last read
+-	items   map[string]Node   // directory entries - can be empty but not nil
+-	virtual map[string]vState // virtual directory entries - may be nil
++	mu             sync.RWMutex // protects the following
++	parent         *Dir         // parent, nil for root
++	path           string
++	entry          fs.Directory
++	read           time.Time         // time directory entry last read
++	items          map[string]Node   // directory entries - can be empty but not nil
++	virtual        map[string]vState // virtual directory entries - may be nil
++	listing        *directoryListing // protected by mu
++	listingHistory []*directoryListing
+ 
+ 	modTimeMu sync.Mutex // protects the following
+ 	modTime   time.Time
+@@ -238,6 +240,11 @@
+ 	hasVirtual = d.hasVirtual()
+ 	if !hasVirtual {
+ 		d.read = time.Time{}
++		if d.listing != nil && d.listing.cancel != nil {
++			d.listing.cancel()
++		}
++		d.listing = nil
++		d.listingHistory = nil
+ 		d.items = make(map[string]Node)
+ 		d.cleanupTimer.Stop()
+ 	} else {
+@@ -520,6 +527,9 @@
+ 
+ // read the directory and sets d.items - must be called with the lock held
+ func (d *Dir) _readDir() error {
++	if !d.vfs.Opt.BlockNormDupes {
++		return d._waitForListing()
++	}
+ 	when := time.Now()
+ 	if age, stale := d._age(when); stale {
+ 		if age != 0 {
+@@ -720,8 +730,16 @@
+ // update d.items and if dirTree is not nil update each dir in the DirTree below this one and
+ // set the last read time - must be called with the lock held
+ func (d *Dir) _readDirFromEntries(entries fs.DirEntries, dirTree dirtree.DirTree, when time.Time) error {
++	mv := d._newManageVirtuals()
++	if err := d._mergeListingEntries(entries, dirTree, when, mv); err != nil {
++		return err
++	}
++	mv.end(d)
++	return nil
++}
++
++func (d *Dir) _mergeListingEntries(entries fs.DirEntries, dirTree dirtree.DirTree, when time.Time, mv manageVirtuals) error {
+ 	var err error
+-	mv := d._newManageVirtuals()
+ 	for _, entry := range entries {
+ 		name := path.Base(entry.Remote())
+ 		if name == "." || name == ".." {
+@@ -750,7 +768,9 @@
+ 			}
+ 			dir := node.(*Dir)
+ 			dir.mu.Lock()
++			dir.modTimeMu.Lock()
+ 			dir.modTime = item.ModTime(d.vfs.ctx)
++			dir.modTimeMu.Unlock()
+ 			dir.entry = item
+ 			if dirTree != nil {
+ 				err = dir._readDirFromDirTree(dirTree, when)
+@@ -772,7 +792,6 @@
+ 		}
+ 		d.items[name] = node
+ 	}
+-	mv.end(d)
+ 	return nil
+ }
+ 
+@@ -860,6 +879,19 @@
+ // contains files with names that differ only by case.
+ func (d *Dir) stat(leaf string) (Node, error) {
+ 	d.mu.Lock()
++	// Already listed names remain usable while the rest of this directory arrives.
++	if d.listing != nil && !d.listing.done {
++		if item, ok := d.items[leaf]; ok && d.virtual[leaf] != vDel {
++			d.mu.Unlock()
++			return item, nil
++		}
++		if leaf == ".DS_Store" || strings.HasPrefix(leaf, "._") {
++			if node, err, handled := d._lookupFinderMetadata(leaf); handled {
++				d.mu.Unlock()
++				return node, err
++			}
++		}
++	}
+ 	err := d._readDir()
+ 	if err != nil {
+ 		d.mu.Unlock()
+--- a/rclone/vfs/turtle_pages.go
++++ b/rclone/vfs/turtle_pages.go
+@@ -0,0 +1,211 @@
++package vfs
++
++import (
++	"context"
++	"errors"
++	"github.com/rclone/rclone/fs"
++	"github.com/rclone/rclone/fs/filter"
++	"github.com/rclone/rclone/fs/list"
++	"os"
++	"path"
++	"sort"
++	"sync/atomic"
++	"time"
++)
++
++var listingSequence atomic.Uint64
++var ErrListingChanged = errors.New("directory listing changed; restart enumeration")
++
++type directoryListing struct {
++	cancel   context.CancelFunc
++	verifier uint64
++	path     string
++	entries  []os.FileInfo
++	changed  chan struct{}
++	done     bool
++	err      error
++}
++
++// Caller holds d.mu; no remote operation runs while it is held.
++func (d *Dir) _startListing() *directoryListing {
++	if d.listing != nil && !d.listing.done {
++		return d.listing
++	}
++	_, stale := d._age(time.Now())
++	if !stale && d.listing != nil {
++		return d.listing
++	}
++	p := &directoryListing{verifier: listingSequence.Add(1), path: d.path, changed: make(chan struct{})}
++	if d.listing != nil {
++		d.listingHistory = append(d.listingHistory, d.listing)
++		if len(d.listingHistory) > 8 {
++			d.listingHistory = d.listingHistory[len(d.listingHistory)-8:]
++		}
++	}
++	d.listing = p
++	if !stale {
++		for _, n := range d.items {
++			p.entries = append(p.entries, n)
++		}
++		sort.Slice(p.entries, func(i, j int) bool { return p.entries[i].Name() < p.entries[j].Name() })
++		p.done = true
++		return p
++	}
++	mv := d._newManageVirtuals()
++	ctx, cancel := context.WithCancel(d.vfs.ctx)
++	p.cancel = cancel
++	go func() {
++		defer cancel()
++		seen := make(map[string]bool)
++		err := list.DirPages(ctx, d.f, p.path, func(entries fs.DirEntries) error {
++			d.mu.Lock()
++			defer d.mu.Unlock()
++			if d.path != p.path || d.listing != p {
++				return ErrListingChanged
++			}
++			if err := d._mergeListingEntries(entries, nil, time.Time{}, mv); err != nil {
++				return err
++			}
++			for _, e := range entries {
++				name := path.Base(e.Remote())
++				if n, ok := d.items[name]; ok && !seen[name] && d.virtual[name] != vDel {
++					p.entries = append(p.entries, n)
++					seen[name] = true
++				}
++			}
++			close(p.changed)
++			p.changed = make(chan struct{})
++			return nil
++		})
++		d.mu.Lock()
++		defer d.mu.Unlock()
++		if errors.Is(err, fs.ErrorDirNotFound) {
++			err = nil
++		}
++		if d.path != p.path || d.listing != p {
++			err = ErrListingChanged
++		}
++		if err == nil {
++			mv.end(d)
++			for name, n := range d.items {
++				if !seen[name] {
++					p.entries = append(p.entries, n)
++				}
++			}
++			d.read = time.Now()
++			d.cleanupTimer.Reset(time.Duration(d.vfs.Opt.DirCacheTime * 2))
++		}
++		p.err = err
++		p.done = true
++		close(p.changed)
++	}()
++	return p
++}
++
++// Caller keeps its lock on return, including on error. Full-directory operations still wait for real EOF.
++func (d *Dir) _waitForListing() error {
++	p := d._startListing()
++	for !p.done {
++		changed := p.changed
++		d.mu.Unlock()
++		<-changed
++		d.mu.Lock()
++	}
++	return p.err
++}
++
++// ReadDirPage returns a stable prefix. Cookies index this append-only snapshot;
++// EOF is never reported before the backend has completed successfully.
++func (d *Dir) ReadDirPage(ctx context.Context, cookie, verifier uint64) ([]os.FileInfo, uint64, bool, error) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if d.vfs.Opt.BlockNormDupes { // retain upstream normalization policy
++		if err := d._readDir(); err != nil {
++			return nil, 0, false, err
++		}
++	}
++	p := d.listing
++	if cookie == 0 {
++		if p != nil && p.done {
++			d.listingHistory = append(d.listingHistory, p)
++			if len(d.listingHistory) > 8 {
++				d.listingHistory = d.listingHistory[len(d.listingHistory)-8:]
++			}
++			d.listing = nil
++		}
++		p = d._startListing()
++	} else if p == nil || p.verifier != verifier {
++		p = nil
++		for _, old := range d.listingHistory {
++			if old.verifier == verifier {
++				p = old
++				break
++			}
++		}
++		if p == nil {
++			return nil, 0, false, ErrListingChanged
++		}
++	}
++	if cookie > 0 && verifier != p.verifier {
++		return nil, 0, false, ErrListingChanged
++	}
++	// The next real entry has index cookie-1 (cookies 0 and 1 are dot entries).
++	next := uint64(0)
++	if cookie > 1 {
++		next = cookie - 1
++	}
++	for uint64(len(p.entries)) <= next && !p.done {
++		changed := p.changed
++		d.mu.Unlock()
++		select {
++		case <-changed:
++		case <-ctx.Done():
++		}
++		d.mu.Lock()
++		if err := ctx.Err(); err != nil {
++			return nil, 0, false, err
++		}
++	}
++	if p.err != nil {
++		return nil, 0, false, p.err
++	}
++	return append([]os.FileInfo(nil), p.entries...), p.verifier, p.done, nil
++}
++
++// Finder probes these exact metadata filenames before displaying directory rows.
++// Their absence can be answered with one backend stat instead of waiting for EOF.
++// Called with d.mu held, and restores that lock on every return.
++func (d *Dir) _lookupFinderMetadata(leaf string) (Node, error, bool) {
++	if d.virtual[leaf] == vDel {
++		return nil, ENOENT, true
++	}
++	if len(filter.GetConfig(d.vfs.ctx).Opt.ExcludeFile) > 0 {
++		return nil, nil, false
++	}
++	directory := d.path
++	d.mu.Unlock()
++	object, err := d.f.NewObject(d.vfs.ctx, path.Join(directory, leaf))
++	included := err == nil && filter.GetConfig(d.vfs.ctx).IncludeObject(d.vfs.ctx, object)
++	d.mu.Lock()
++	if d.path != directory {
++		return nil, nil, false
++	}
++	if d.virtual[leaf] == vDel {
++		return nil, ENOENT, true
++	}
++	if n, ok := d.items[leaf]; ok {
++		return n, nil, true
++	}
++	if errors.Is(err, fs.ErrorObjectNotFound) || os.IsNotExist(err) {
++		return nil, ENOENT, true
++	}
++	if err != nil {
++		return nil, nil, false
++	}
++	if !included {
++		return nil, ENOENT, true
++	}
++	n := newFile(d, d.path, object, leaf)
++	d.items[leaf] = n
++	return n, nil, true
++}
+--- a/rclone/vfs/turtle_pages_test.go
++++ b/rclone/vfs/turtle_pages_test.go
+@@ -0,0 +1,150 @@
++package vfs
++
++import (
++	"context"
++	"errors"
++	"github.com/rclone/rclone/backend/local"
++	"github.com/rclone/rclone/fs"
++	"github.com/rclone/rclone/fs/config/configmap"
++	"github.com/rclone/rclone/vfs/vfscommon"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestTurtlePagedListing(t *testing.T) {
++	ctx := context.Background()
++	base := t.TempDir()
++	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
++		if err := os.WriteFile(filepath.Join(base, name), []byte(name), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	f, err := local.NewFs(ctx, "local", base, configmap.Simple{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	entries, err := f.List(ctx, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	gate := make(chan struct{})
++	f.Features().ListP = func(ctx context.Context, dir string, callback fs.ListRCallback) error {
++		if err := callback(entries[:1]); err != nil {
++			return err
++		}
++		<-gate
++		return callback(entries[1:])
++	}
++	opt := vfscommon.Opt
++	opt.DirCacheTime = fs.Duration(time.Hour)
++	v := New(ctx, f, &opt)
++	defer v.Shutdown()
++	d, _ := v.Root()
++	page, verifier, eof, err := d.ReadDirPage(ctx, 0, 0)
++	if err != nil || eof || len(page) != 1 {
++		t.Fatalf("first page: %d %v %v", len(page), eof, err)
++	}
++	known := make(chan error, 1)
++	go func() {
++		n, e := v.Stat(page[0].Name())
++		if e == nil && n.Inode() != page[0].(Node).Inode() {
++			e = errors.New("inode changed")
++		}
++		known <- e
++	}()
++	select {
++	case err := <-known:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("known name waited for the rest of the directory")
++	}
++	// A missing Finder sidecar must not wait for the rest of the directory.
++	missing := make(chan error, 1)
++	go func() { _, err := v.Stat("._absent"); missing <- err }()
++	select {
++	case err := <-missing:
++		if err != ENOENT {
++			t.Fatalf("missing metadata: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("metadata probe waited for listing EOF")
++	}
++	// A second enumeration must not invalidate the active verifier.
++	_, same, _, err := d.ReadDirPage(ctx, 0, 0)
++	if err != nil || same != verifier {
++		t.Fatal("in-flight verifier changed")
++	}
++	waiting := make(chan struct{})
++	go func() { defer close(waiting); _, _, _, _ = d.ReadDirPage(ctx, 2, verifier) }()
++	select {
++	case <-waiting:
++		t.Fatal("returned false EOF before final page")
++	case <-time.After(30 * time.Millisecond):
++	}
++	close(gate)
++	select {
++	case <-waiting:
++	case <-time.After(time.Second):
++		t.Fatal("page did not resume")
++	}
++	all, err := d.ReadDirAll()
++	if err != nil || len(all) != 3 {
++		t.Fatalf("complete listing: %d %v", len(all), err)
++	}
++	page, _, eof, err = d.ReadDirPage(ctx, 2, verifier)
++	if err != nil || !eof || len(page) != 3 {
++		t.Fatalf("continuation: %d %v %v", len(page), eof, err)
++	}
++	_, newVerifier, _, err := d.ReadDirPage(ctx, 0, 0)
++	if err != nil || newVerifier == verifier {
++		t.Fatal("new snapshot missing")
++	}
++	if _, _, _, err = d.ReadDirPage(ctx, 2, verifier); err != nil {
++		t.Fatal("concurrent enumeration lost its snapshot", err)
++	}
++	if _, _, _, err = d.ReadDirPage(ctx, 2, 99999999); !errors.Is(err, ErrListingChanged) {
++		t.Fatal("invalid cookie accepted")
++	}
++	d.ForgetAll()
++	d.mu.Lock()
++	retained := d.listing != nil || len(d.listingHistory) > 0
++	d.mu.Unlock()
++	if retained {
++		t.Fatal("forgotten directory retained snapshots")
++	}
++
++}
++
++func TestTurtleListingFailureDoesNotReportEOF(t *testing.T) {
++	ctx := context.Background()
++	base := t.TempDir()
++	_ = os.WriteFile(filepath.Join(base, "a"), []byte("data"), 0600)
++	f, _ := local.NewFs(ctx, "local", base, configmap.Simple{})
++	entries, _ := f.List(ctx, "")
++	gate := make(chan struct{})
++	failure := errors.New("listing failed")
++	f.Features().ListP = func(ctx context.Context, dir string, callback fs.ListRCallback) error {
++		if err := callback(entries); err != nil {
++			return err
++		}
++		<-gate
++		return failure
++	}
++	opt := vfscommon.Opt
++	v := New(ctx, f, &opt)
++	defer v.Shutdown()
++	d, _ := v.Root()
++	_, verifier, eof, err := d.ReadDirPage(ctx, 0, 0)
++	if err != nil || eof {
++		t.Fatal("early EOF", err)
++	}
++	close(gate)
++	_, _, eof, err = d.ReadDirPage(ctx, 2, verifier)
++	if !errors.Is(err, failure) || eof {
++		t.Fatal("listing error became successful EOF", err)
++	}
++}
+--- a/sftp/client.go
++++ b/sftp/client.go
+@@ -376,13 +376,18 @@
+ // and returns a list of directory entries.
+ // The passed context can be used to cancel the operation
+ // returning all entries listed up to the cancellation.
+-func (c *Client) ReadDirContext(ctx context.Context, p string) ([]os.FileInfo, error) {
++func (c *Client) ReadDirContext(ctx context.Context, p string) (entries []os.FileInfo, err error) {
++	err = c.ReadDirPages(ctx, p, func(page []os.FileInfo) error { entries = append(entries, page...); return nil })
++	return
++}
++
++// ReadDirPages delivers a page before requesting the next, and closes the handle on cancellation or error.
++func (c *Client) ReadDirPages(ctx context.Context, p string, callback func([]os.FileInfo) error) error {
+ 	handle, err := c.opendir(ctx, p)
+ 	if err != nil {
+-		return nil, err
++		return err
+ 	}
+ 	defer c.close(handle) // this has to defer earlier than the lock below
+-	var entries []os.FileInfo
+ 	var done = false
+ 	for !done {
+ 		id := c.nextID()
+@@ -397,9 +402,10 @@
+ 		}
+ 		switch typ {
+ 		case sshFxpName:
++			var entries []os.FileInfo
+ 			sid, data := unmarshalUint32(data)
+ 			if sid != id {
+-				return nil, &unexpectedIDErr{id, sid}
++				return &unexpectedIDErr{id, sid}
+ 			}
+ 			count, data := unmarshalUint32(data)
+ 			for i := uint32(0); i < count; i++ {
+@@ -409,25 +415,30 @@
+ 				var attr *FileStat
+ 				attr, data, err = unmarshalAttrs(data)
+ 				if err != nil {
+-					return nil, err
++					return err
+ 				}
+ 				if filename == "." || filename == ".." {
+ 					continue
+ 				}
+ 				entries = append(entries, fileInfoFromStat(attr, path.Base(filename)))
+ 			}
++			if len(entries) > 0 {
++				if err := callback(entries); err != nil {
++					return err
++				}
++			}
+ 		case sshFxpStatus:
+ 			// TODO(dfc) scope warning!
+ 			err = normaliseError(unmarshalStatus(id, data))
+ 			done = true
+ 		default:
+-			return nil, unimplementedPacketErr(typ)
++			return unimplementedPacketErr(typ)
+ 		}
+ 	}
+ 	if err == io.EOF {
+ 		err = nil
+ 	}
+-	return entries, err
++	return err
+ }
+ 
+ func (c *Client) opendir(ctx context.Context, path string) (string, error) {
+--- a/nfs/conn.go
++++ b/nfs/conn.go
+@@ -48,6 +48,8 @@
+ 	c.writeSerializer = make(chan []byte, 1)
+ 	go c.serializeWrites(connCtx)
+ 
++	slots := make(chan struct{}, 64)
++	defer c.Close()
+ 	bio := bufio.NewReader(c.Conn)
+ 	for {
+ 		w, err := c.readRequestHeader(connCtx, bio)
+@@ -59,20 +61,33 @@
+ 			}
+ 			return
+ 		}
+-		Log.Tracef("request: %v", w.req)
+-		err = c.handle(connCtx, w)
+-		respErr := w.finish(connCtx)
+-		if err != nil {
+-			Log.Errorf("error handling req: %v", err)
+-			// failure to handle at a level needing to close the connection.
++		// The next RPC must not share its reader with an in-flight request.
++		// Bound records before allocation; NFSv3 data requests fit below this cap.
++		body := w.req.Body.(*io.LimitedReader)
++		if body.N > 4<<20 {
+ 			c.Close()
+ 			return
+ 		}
+-		if respErr != nil {
+-			Log.Errorf("error sending response: %v", respErr)
++		data, err := io.ReadAll(body)
++		if err != nil || body.N != 0 {
+ 			c.Close()
+ 			return
+ 		}
++		w.req.Body = &io.LimitedReader{R: bytes.NewReader(data), N: int64(len(data))}
++		select {
++		case slots <- struct{}{}:
++		case <-connCtx.Done():
++			return
++		}
++		go func(w *response) {
++			defer func() { <-slots }()
++			err := c.handle(connCtx, w)
++			respErr := w.finish(connCtx)
++			if err != nil || respErr != nil {
++				c.Close()
++				cancel()
++			}
++		}(w)
+ 	}
+ }
+ 
+@@ -290,7 +305,7 @@
+ 		return nil, ErrInputInvalid
+ 	}
+ 	reqLen := fragment - uint32(1<<31)
+-	if reqLen < 40 {
++	if reqLen < 40 || reqLen > 4<<20 {
+ 		return nil, ErrInputInvalid
+ 	}
+ 
+--- a/nfs/nfs_onreaddir.go
++++ b/nfs/nfs_onreaddir.go
+@@ -45,7 +45,7 @@
+ 		return &NFSStatusError{NFSStatusStale, err}
+ 	}
+ 
+-	contents, verifier, err := getDirListingWithVerifier(userHandle, obj.Handle, obj.CookieVerif)
++	contents, verifier, eof, err := getDirListingPage(ctx, userHandle, obj.Handle, obj.Cookie, obj.CookieVerif)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -77,7 +77,6 @@
+ 		)
+ 	}
+ 
+-	eof := true
+ 	maxEntities := userHandle.HandleLimit() / 2
+ 	for i, c := range contents {
+ 		// cookie equates to index within contents + 2 (for '.' and '..')
+--- a/nfs/nfs_onreaddirplus.go
++++ b/nfs/nfs_onreaddirplus.go
+@@ -51,7 +51,7 @@
+ 		return &NFSStatusError{NFSStatusStale, err}
+ 	}
+ 
+-	contents, verifier, err := getDirListingWithVerifier(userHandle, obj.Handle, obj.CookieVerif)
++	contents, verifier, eof, err := getDirListingPage(ctx, userHandle, obj.Handle, obj.Cookie, obj.CookieVerif)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -84,7 +84,6 @@
+ 		)
+ 	}
+ 
+-	eof := true
+ 	maxEntities := userHandle.HandleLimit() / 2
+ 	fb := 0
+ 	fss := 0
+--- a/nfs/turtle_concurrency_test.go
++++ b/nfs/turtle_concurrency_test.go
+@@ -0,0 +1,80 @@
++package nfs
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"github.com/willscott/go-nfs-client/nfs/rpc"
++	"github.com/willscott/go-nfs-client/nfs/xdr"
++	"io"
++	"net"
++	"testing"
++	"time"
++)
++
++func TestTurtleSlowRequestDoesNotBlockAnotherRPC(t *testing.T) {
++	gate := make(chan struct{})
++	const protocol = 999999
++	handler := func(ctx context.Context, w *response, h Handler) error {
++		value, err := xdr.ReadUint32(w.req.Body)
++		if err != nil {
++			return err
++		}
++		if value == 1 {
++			select {
++			case <-gate:
++			case <-ctx.Done():
++				return ctx.Err()
++			}
++		}
++		return w.Write([]byte{0, 0, 0, 0})
++	}
++	if err := RegisterMessageHandler(protocol, 1, handler); err != nil {
++		t.Fatal(err)
++	}
++	defer delete(registeredHandlers, registeredHandlerID{protocol, 1})
++	server, client := net.Pipe()
++	defer client.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { (&Server{}).newConn(server).serve(ctx); close(done) }()
++	send := func(xid, value uint32) {
++		var payload bytes.Buffer
++		_ = xdr.Write(&payload, xid)
++		_ = xdr.Write(&payload, uint32(0))
++		_ = xdr.Write(&payload, rpc.Header{Rpcvers: 2, Prog: protocol, Vers: 3, Proc: 1})
++		_ = xdr.Write(&payload, value)
++		_ = binary.Write(client, binary.BigEndian, uint32(payload.Len())|1<<31)
++		if _, err := client.Write(payload.Bytes()); err != nil {
++			t.Fatal(err)
++		}
++	}
++	send(1, 1)
++	send(2, 2)
++	_ = client.SetReadDeadline(time.Now().Add(time.Second))
++	var size uint32
++	if err := binary.Read(client, binary.BigEndian, &size); err != nil {
++		t.Fatal("slow request blocked fast request", err)
++	}
++	body := make([]byte, size&0x7fffffff)
++	if _, err := io.ReadFull(client, body); err != nil {
++		t.Fatal(err)
++	}
++	if got := binary.BigEndian.Uint32(body); got != 2 {
++		t.Fatalf("response xid=%d, want 2", got)
++	}
++	close(gate)
++	if err := binary.Read(client, binary.BigEndian, &size); err != nil {
++		t.Fatal(err)
++	}
++	body = make([]byte, size&0x7fffffff)
++	if _, err := io.ReadFull(client, body); err != nil {
++		t.Fatal(err)
++	}
++	if binary.BigEndian.Uint32(body) != 1 {
++		t.Fatal("wrong delayed response")
++	}
++	client.Close()
++	<-done
++}
+--- a/nfs/turtle_pages.go
++++ b/nfs/turtle_pages.go
+@@ -0,0 +1,33 @@
++package nfs
++
++import (
++	"context"
++	"os"
++)
++
++type pagedDirectory interface {
++	ReadDirPage(context.Context, string, uint64, uint64) ([]os.FileInfo, uint64, bool, error)
++}
++
++func getDirListingPage(ctx context.Context, h Handler, handle []byte, cookie, verifier uint64) ([]os.FileInfo, uint64, bool, error) {
++	f, p, err := h.FromHandle(handle)
++	if err != nil {
++		return nil, 0, false, &NFSStatusError{NFSStatusStale, err}
++	}
++	if pages, ok := f.(pagedDirectory); ok {
++		entries, v, eof, err := pages.ReadDirPage(ctx, f.Join(p...), cookie, verifier)
++		if err != nil {
++			if _, ok := err.(*NFSStatusError); ok {
++				return nil, 0, false, err
++			}
++			status := NFSStatusIO
++			if os.IsPermission(err) {
++				status = NFSStatusAccess
++			}
++			return nil, 0, false, &NFSStatusError{status, err}
++		}
++		return entries, v, eof, nil
++	}
++	entries, v, err := getDirListingWithVerifier(h, handle, verifier)
++	return entries, v, true, err
++}

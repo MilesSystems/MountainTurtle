@@ -655,6 +655,7 @@ struct MainView: View {
         .sheet(item: $model.drivePanel) { panel in
             switch panel.kind {
             case .photos: PhotoBrowserView(connection: panel.connection)
+            case .files: FileBrowserView(connection: panel.connection)
             case .metrics: DriveMetricsView(connection: panel.connection)
             case .settings: DriveSettingsView(model: model, connection: panel.connection)
             case .rename: RenameDriveView(model: model, connection: panel.connection)
@@ -797,6 +798,7 @@ struct MainView: View {
                     }.padding(.top, 5)
                     Spacer()
                     Menu {
+                        Button("Browse files…") { model.drivePanel = DrivePanel(connection: connection, kind: .files) }
                         if connection.supportsPhotoBrowser {
                             Button("Browse photos…") { model.drivePanel = DrivePanel(connection: connection, kind: .photos) }
                         }
@@ -838,6 +840,7 @@ struct MainView: View {
                     notice(message, symbol: "sidebar.left", color: .orange)
                 }
                 HStack(spacing: 10) {
+                    Button { model.drivePanel = DrivePanel(connection: connection, kind: .files) } label: { Label("Browse files", systemImage: "list.bullet.indent") }
                     if connection.isConnected {
                         Button { model.openFinder(connection) } label: { Label("Show in Finder", systemImage: "folder") }.buttonStyle(.borderedProminent)
                         Button { Task { await model.action(["disconnect", connection.id]) } } label: { Label("Eject", systemImage: "eject") }
