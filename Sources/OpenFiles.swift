@@ -30,7 +30,7 @@ struct OpenFilesView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var snapshot: OpenHandleSnapshot?
     @State private var loading = false
-    @State private var error: String?
+    @State private var errorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -79,7 +79,7 @@ struct OpenFilesView: View {
                 Text("Snapshot: \(Date(timeIntervalSince1970: snapshot.checkedAt).formatted(date: .omitted, time: .standard))")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let error { Text(error).font(.callout).foregroundStyle(.orange) }
+            if let errorMessage { Text(errorMessage).font(.callout).foregroundStyle(.orange) }
             HStack {
                 Text("Inspection only. No processes are stopped or files changed.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -95,7 +95,7 @@ struct OpenFilesView: View {
         do {
             let data = try await ServiceClient.run(["open-files", connection.id])
             snapshot = try JSONDecoder().decode(OpenHandleSnapshot.self, from: data)
-            error = nil
-        } catch { error = "Could not inspect open files. Try refreshing. No processes were stopped." }
+            errorMessage = nil
+        } catch { errorMessage = "Could not inspect open files. Try refreshing. No processes were stopped." }
     }
 }
