@@ -42,7 +42,7 @@ struct DriveEvent: Codable, Identifiable, Equatable {
     var stateLabel: String {
         switch state {
         case "queued": return "Queued"
-        case "running": return "In progress"
+        case "running": return Date().timeIntervalSince1970 - updatedAt > 30 ? "Status not recently confirmed" : "In progress (log observation)"
         case "failed": return "Needs attention"
         default: return "Done"
         }
@@ -587,6 +587,7 @@ struct MainView: View {
     @State private var showSetup = false
     @State private var editing: Connection?
     @State private var removing: Connection?
+    @State private var reporting: Connection?
     @State private var fileDropTargeted = false
     @AppStorage("setupPanelSeenVersion") private var setupPanelSeenVersion = ""
     @Environment(\.openWindow) private var openWindow
@@ -641,6 +642,7 @@ struct MainView: View {
         }
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
         .sheet(isPresented: $showSetup) { SetupView(model: model) { showSetup = false; showAdd = true } }
+        .sheet(item: $reporting) { FailureReportView(connection: $0) }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
         .sheet(item: $model.transferRequest) { request in
             switch request.kind {
@@ -822,6 +824,9 @@ struct MainView: View {
                     }
                 }
                 UploadStatusView(model: model, connection: connection)
+                Button { reporting = connection } label: {
+                    Label("Failures & reports…", systemImage: "exclamationmark.bubble")
+                }.help("Review failed operations and prepare a report for the developer")
                 if let message = connection.sidebarError, !message.isEmpty {
                     notice(message, symbol: "sidebar.left", color: .orange)
                 }
@@ -854,9 +859,7 @@ struct MainView: View {
                 if let message = model.driveMessage {
                     notice(message, symbol: "checkmark.circle", color: moss)
                 }
-                if let events = connection.events, !events.isEmpty {
-                    activitySection(Array(events.prefix(8)))
-                }
+                activityPanel(connection)
                 if connection.supportsPhotoBrowser {
                 HStack(spacing: 12) {
                     Image(systemName: "photo.on.rectangle.angled").font(.title2).foregroundStyle(moss)
@@ -934,10 +937,20 @@ struct MainView: View {
         }.font(.system(size: 12)).padding(.vertical, 13)
     }
 
+    private func activityPanel(_ connection: Connection) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            OperationActivityView(connection: connection)
+            if let events = connection.events, !events.isEmpty {
+                Divider()
+                activitySection(Array(events.prefix(8)))
+            }
+        }.padding(16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
     private func activitySection(_ events: [DriveEvent]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("Activity queue & history", systemImage: "clock.arrow.circlepath").font(.system(size: 13, weight: .semibold))
+                Label("File changes", systemImage: "clock.arrow.circlepath").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Text("\(events.count) recent operations").font(.system(size: 11)).foregroundStyle(.secondary)
             }
@@ -947,7 +960,7 @@ struct MainView: View {
                     if event.id != events.last?.id { Divider().padding(.leading, 32) }
                 }
             }
-        }.padding(16).background(cream.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 14))
+        }
     }
 
     private func activityRow(_ event: DriveEvent) -> some View {

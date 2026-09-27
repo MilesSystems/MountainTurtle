@@ -608,14 +608,19 @@ def main():
         paths = turtle.Paths(resources=args.resource_dir)
         connection = turtle.find_connection(turtle.Store(paths).read(), args.id)
         browser = PhotoBrowser(connection, paths)
-        if args.command == "list":
-            response = browser.list(args.prefix, args.cursor, args.limit)
-        elif args.command == "thumbnail":
-            response = browser.thumbnail(args.key, args.etag, args.size, args.pixels, args.allow_original, args.cache_only)
-        elif args.command == "date-taken":
-            response = browser.date_taken(args.key, args.etag, args.size, args.cache_only)
-        else:
-            response = browser.open_original(args.key, args.etag, args.size)
+        import operation_activity
+        kind = {"list": "list", "thumbnail": "preview", "date-taken": "metadata"}.get(args.command, "read")
+        with operation_activity.measured(paths, connection["id"], kind, getattr(args, "key", getattr(args, "prefix", "")), cancelled=(Cancelled,)) as observation:
+            if args.command == "list":
+                response = browser.list(args.prefix, args.cursor, args.limit)
+            elif args.command == "thumbnail":
+                response = browser.thumbnail(args.key, args.etag, args.size, args.pixels, args.allow_original, args.cache_only)
+            elif args.command == "date-taken":
+                response = browser.date_taken(args.key, args.etag, args.size, args.cache_only)
+            else:
+                response = browser.open_original(args.key, args.etag, args.size)
+            if args.command == "thumbnail" and not response.get("thumbnailPath"):
+                observation["state"] = "unavailable"
         print(json.dumps(response, ensure_ascii=False))
     except Exception as error:
         message = str(error) if isinstance(error, (BrowserError, ValueError)) else "The photo request could not finish. Try again."

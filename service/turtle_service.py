@@ -756,6 +756,49 @@ def start_directory_refresh(remote_control, directory=None, recursive=True):
     return remote_control_post(remote_control, "vfs/refresh", payload)
 
 
+LISTING_MONITORS = threading.BoundedSemaphore(8)
+
+
+def observed_directory_refresh(paths, connection, remote_control, directory=None, recursive=True):
+    import operation_activity as activity
+    identity = activity.start(paths, connection['id'], 'list', directory or '/')
+    began = time.perf_counter()
+    try:
+        result = start_directory_refresh(remote_control, directory, recursive=recursive) if directory is not None else start_directory_refresh(remote_control, recursive=recursive)
+    except Exception:
+        activity.finish(paths, identity, 'failed', time.perf_counter() - began)
+        raise
+    job = result.get('jobid')
+    if type(job) is not int or not LISTING_MONITORS.acquire(blocking=False):
+        activity.finish(paths, identity, 'unknown', time.perf_counter() - began)
+        return result
+
+    def monitor():
+        outcome = 'unknown'
+        try:
+            for _ in range(900):
+                status = remote_control_post(remote_control, 'job/status', {'jobid': job}, timeout=1)
+                if status.get('finished') is True:
+                    output = status.get('output', {}).get('result') if isinstance(status.get('output'), dict) else None
+                    if status.get('success') is False:
+                        outcome = 'failed'
+                    elif status.get('success') is True and isinstance(output, dict):
+                        outcome = 'complete' if all(v == 'OK' for v in output.values()) else 'failed'
+                    break
+                time.sleep(2)
+        except (OSError, ValueError, TypeError):
+            pass
+        finally:
+            activity.finish(paths, identity, outcome, time.perf_counter() - began)
+            LISTING_MONITORS.release()
+    try:
+        threading.Thread(target=monitor, name='Mountain Turtle listing status', daemon=True).start()
+    except RuntimeError:
+        LISTING_MONITORS.release()
+        activity.finish(paths, identity, 'unknown', time.perf_counter() - began)
+    return result
+
+
 def remote_control_settings():
     # If another process wins this short port reservation race, rclone fails
     # closed and the supervisor retries with a fresh authenticated endpoint.
@@ -1600,7 +1643,7 @@ class Supervisor:
             keep = dict(sorted(self.folder_refreshes.items(), key=lambda item: item[1])[-384:])
             self.folder_refreshes = keep
         try:
-            start_directory_refresh(child["remoteControl"], relative, recursive=False)
+            observed_directory_refresh(self.paths, connection, child["remoteControl"], relative, recursive=False)
         except Exception:
             logging.warning("Could not refresh Finder folder listing for %s", connection["id"], exc_info=True)
             return {"ok": False, "message": "Folder listing refresh is unavailable right now."}
@@ -1659,8 +1702,11 @@ class Supervisor:
 
         def worker():
             try:
-                result = warm_open_folder_cache(self.folder_cache_path(connection, record.get("relativePath", "")),
-                                                cancel.is_set, should_continue)
+                import operation_activity
+                with operation_activity.measured(self.paths, connection['id'], 'prefetch', record.get('relativePath', '')) as observation:
+                    result = warm_open_folder_cache(self.folder_cache_path(connection, record.get("relativePath", "")),
+                                                    cancel.is_set, should_continue)
+                    observation['state'] = 'complete' if result.get('state') == 'complete' else 'cancelled' if result.get('state') == 'cancelled' else 'paused' if result.get('state') == 'limited' else 'failed'
             except Exception as error:
                 result = {"state": "error", "files": 0, "bytes": 0, "errors": 1,
                           "message": str(error) if isinstance(error, ValueError)
@@ -1948,6 +1994,11 @@ class Supervisor:
         self.poll_folder_cache(state["connections"], mounts, now)
         self.poll_open_folder_prefetch(state["connections"], mounts, state.get("shutdown", False))
         self.poll_activity_logs(state["connections"], now)
+        try:
+            import failure_reports
+            failure_reports.collect(self.paths, state["connections"], now)
+        except (OSError, ValueError):
+            logging.warning("Failure history could not be updated; drive operation continues.")
         for connection in state["connections"]:
             identity = connection["id"]
             reconnecting = connection.get("reconnectRequested", False) and connection.get("desiredConnected", False)
@@ -2026,7 +2077,7 @@ class Supervisor:
                     self.start_sidebar(connection, child)
                 if connection.get("refreshRequested") and now - child["started"] >= 5:
                     try:
-                        start_directory_refresh(child["remoteControl"], recursive=True)
+                        observed_directory_refresh(self.paths, connection, child["remoteControl"], recursive=True)
                     except ProcessLookupError:
                         continue  # The next tick handles the process exit and normal backoff.
                     except Exception:
@@ -2363,6 +2414,8 @@ def parser():
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     commands.add_parser("recover-connections")
+    commands.add_parser("failure-report").add_argument("id")
+    commands.add_parser("operation-status").add_argument("id")
     commands.add_parser("export-connection").add_argument("id")
     commands.add_parser("inspect-connection")
     commands.add_parser("export-setup").add_argument("id")
@@ -2448,6 +2501,14 @@ def action(args, paths):
     store = Store(paths)
     if args.command == "status":
         return status(paths)
+    if args.command == "operation-status":
+        import operation_activity
+        connection = find_connection(store.read(), args.id)
+        return operation_activity.snapshot(paths, connection, store.runtime().get("connections", {}).get(args.id, {}), remote_control_post)
+    if args.command == "failure-report":
+        import failure_reports
+        connection = find_connection(store.read(), args.id)
+        return failure_reports.snapshot(paths, connection, store.runtime().get("connections", {}).get(args.id, {}))
     if args.command in ("upload-status", "retry-uploads"):
         import upload_status
         connection = find_connection(store.read(), args.id)

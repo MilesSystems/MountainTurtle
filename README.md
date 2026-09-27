@@ -584,3 +584,29 @@ unchanged until completion; remote folders are not point-in-time snapshots.
 Pending local uploads must finish before starting. Existing ZIPs are never
 replaced. Copy the finished ZIP to the remote drive if you want it stored there.
 Finder's built-in **Compress** command still uses Finder's own archive workflow.
+
+### Activity and problem reports
+
+The activity panel shows measured app requests for folder listings, photo previews,
+original retrieval and prefetch, plus current mount transfers from local counters.
+Running app requests show elapsed time; completed requests show their duration.
+Transfer timing starts when the app first observes the transfer and is labelled
+accordingly. Disappearing transfers have an unconfirmed outcome, not an invented
+success. Finder cache hits and Quick Look requests may not be individually
+identifiable. Listing monitoring is bounded and uses asynchronous job status,
+never a directory-tree statistics walk.
+
+**Failures & reports** keeps up to 200 recent error records for seven days,
+including delete, rename, listing and transfer errors reported by the drive.
+It reads at most 512 KiB of new local log data per connection per poll, skips
+symlinked logs and stores its history with owner-only permissions. Finder can
+reject an operation before it reaches the drive; add its message in the report
+when no backend error was captured. Reported attempts may have succeeded on a
+later retry.
+
+**Send to developer** opens a preview. Generated reports contain allowlisted
+operation categories, timestamps, durations and anonymous item labels. They omit
+raw logs, filenames, connection names, server addresses, usernames and credentials.
+Review your own description for private information. Save a text file, or copy
+the report and open GitHub to paste and submit it yourself. GitHub issues are
+public; the app does not upload or submit reports automatically.
