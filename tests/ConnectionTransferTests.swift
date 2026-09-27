@@ -16,6 +16,8 @@ private enum ConnectionTransferTests {
             case "file_limits": try fileLimits()
             case "duplicate_names": try duplicateNames()
             case "unicode_names": try unicodeNames()
+            case "setup_readiness": try await setupReadiness()
+            case "python_discovery": try pythonDiscovery()
             default: throw TransferTestFailure(description: "Unknown test case")
             }
             print("PASS \(CommandLine.arguments[1])")
@@ -112,6 +114,31 @@ private enum ConnectionTransferTests {
         try boundary.write(to: file)
         let result = try ConnectionTransferIO.read(file)
         try require(result == boundary, "File read truncated a file at the wrapper limit")
+    }
+
+    @MainActor private static func setupReadiness() throws {
+        let model = AppModel()
+        model.isLoading = false
+        model.serviceError = "Python is unavailable"
+        try require(model.setupNeedsAttention, "Missing Python must not hide setup behind a service error")
+        model.dependencies = Dependencies(python: "/fixture/python3", awsCliV2: false, rcloneNfsmount: true,
+                                          appInstalled: true, privacyState: "notRequested")
+        model.serviceError = nil
+        try require(!model.setupNeedsAttention, "SFTP onboarding must not require AWS or prior permission approval")
+        model.connections = [connection("S3 drive")]
+        try require(model.setupNeedsAttention, "S3 must require AWS CLI")
+    }
+
+    private static func pythonDiscovery() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("python3")
+        try require(ServiceClient.workingPython(candidates: [path.path]) == nil, "Missing runtime was accepted")
+        try Data("#!/bin/sh\nexit 1\n".utf8).write(to: path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path)
+        try require(ServiceClient.workingPython(candidates: [path.path]) == nil, "Broken runtime was accepted")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: path)
+        try require(ServiceClient.workingPython(candidates: [path.path]) == path.path, "Newly installed runtime was not discovered")
     }
 
     private static func connection(_ name: String) -> Connection {

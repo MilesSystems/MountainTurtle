@@ -70,6 +70,39 @@ class RecoveryTests(unittest.TestCase):
                 supervisor.restore_login_intent()
                 self.assertEqual(self.store.read()["connections"][0]["desiredConnected"], keeps_intent)
 
+    def test_network_recovery_only_retries_requested_unmounted_drives(self):
+        with patch.object(turtle, 'mount_table', return_value=set()), patch.object(turtle, 'ensure_service') as ensure:
+            turtle.action(turtle.parser().parse_args(['recover-connections']), self.paths)
+        current = self.store.read()['connections']
+        self.assertEqual(current[0]['revision'], 1)
+        self.assertNotIn('revision', current[1])
+        self.assertFalse(current[1]['desiredConnected'])
+        ensure.assert_called_once()
+
+    def test_network_recovery_preserves_live_mounts_and_update_handoff(self):
+        for mounted, handoff in (({str(self.paths.mounts / 'Manual drive')}, None), (set(), {'phase': 'prepared'})):
+            with self.store.update() as state:
+                if handoff:
+                    state['updateHandoff'] = handoff
+            before = self.store.read()
+            with patch.object(turtle, 'mount_table', return_value=mounted), patch.object(turtle, 'ensure_service') as ensure:
+                turtle.action(turtle.parser().parse_args(['recover-connections']), self.paths)
+            self.assertEqual(self.store.read(), before)
+            ensure.assert_not_called()
+
+    def test_wake_clears_backoff_but_does_not_restore_ejected_drives(self):
+        supervisor = turtle.Supervisor(self.paths)
+        supervisor.last_tick_at = 100
+        supervisor.retry['manual-drive'] = 1000
+        supervisor.revisions['manual-drive'] = 0
+        with patch.object(turtle.time, 'time', return_value=200), \
+             patch.object(turtle, 'mount_table', return_value=set()), \
+             patch.object(supervisor, 'start_mount') as start:
+            supervisor.tick()
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0]['id'], 'manual-drive')
+        self.assertFalse(self.store.read()['connections'][1]['desiredConnected'])
+
 
 if __name__ == "__main__":
     unittest.main()

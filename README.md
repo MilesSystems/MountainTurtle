@@ -53,6 +53,30 @@ installed, the app can install `rclone` and optionally `awscli`. If Homebrew is 
 Terminal installer that runs Homebrew's official install script and then installs
 the required packages.
 
+## Upload status and recovery
+
+Each drive shows a local upload summary: queued and active uploads, cached changes,
+and cache errors. **No pending uploads** requires a complete local metadata check,
+an empty live upload queue, and no open files reported by rclone. It describes
+this drive's local write queue, not a remote backup or content verification.
+Unavailable or incomplete checks remain explicitly unconfirmed. The card also
+shows the last completed transfer recorded in the activity history.
+
+**Retry queued uploads** advances up to 20 waiting uploads without ejecting the
+drive or deleting cached files. Further batches can be requested; automatic retries
+continue. Close files to allow their pending writes to enter the upload queue.
+Safe ejection continues to wait for pending writes and open files.
+
+Failed connections show their next retry time and **Retry now**. After the Mac
+wakes, the supervisor clears old retry delays. While the app is open, restored
+network access also retries requested, unmounted drives. Drives you ejected stay
+disconnected, and working mounts are preserved. Expired AWS sign-in still requires
+your approval through **Sign in to AWS**.
+
+Mac setup is available even before Python is installed. **Install tools** includes
+Python and rclone, with AWS CLI optional for S3. Checks refresh automatically; once
+the tools are ready, **Add your first drive** opens the connection editor.
+
 ## Backend support
 
 | Connection type | Authentication | Finder and local metrics | Cloud storage and cost | Photo browser |

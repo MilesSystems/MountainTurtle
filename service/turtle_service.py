@@ -725,7 +725,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def remote_control_post(remote_control, method, payload, timeout=3):
+def remote_control_post(remote_control, method, payload, timeout=3, max_response_bytes=16 * 1024):
     port = remote_control.get("rcPort")
     user, password = remote_control.get("rcUser"), remote_control.get("rcPass")
     if (type(port) is not int or not 1 <= port <= 65535 or not isinstance(user, str)
@@ -738,8 +738,8 @@ def remote_control_post(remote_control, method, payload, timeout=3):
                                               "Content-Type": "application/json"}, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(request, timeout=timeout) as response:
-        raw = response.read(16 * 1024 + 1)
-    if len(raw) > 16 * 1024:
+        raw = response.read(max_response_bytes + 1)
+    if len(raw) > max_response_bytes:
         raise ValueError("Folder listing refresh returned an invalid response")
     result = json.loads(raw or b"{}")
     if not isinstance(result, dict):
@@ -1483,6 +1483,7 @@ class Supervisor:
         self.badge_connections = []
         self.sidebar_processes, self.sidebar_results = {}, {}
         self.folder_jobs = {}
+        self.last_tick_at = None
 
     def record(self, connection, state, message="", pid=None):
         rc = self.children.get(connection["id"], {}).get("remoteControl", {})
@@ -1939,6 +1940,10 @@ class Supervisor:
                                      if marker.get("phase") == "resuming" and not state.get("shutdown") else None)
         mounts = mount_table()
         now = time.time()
+        # A suspended Mac should not retain an old retry delay after waking.
+        if self.last_tick_at is not None and now - self.last_tick_at > 30:
+            self.retry.clear()
+        self.last_tick_at = now
         self.poll_sidebars(state["connections"], mounts)
         self.poll_folder_cache(state["connections"], mounts, now)
         self.poll_open_folder_prefetch(state["connections"], mounts, state.get("shutdown", False))
@@ -2062,6 +2067,11 @@ class Supervisor:
             state=self.runtime.get(connection["id"], {}).get("state", "disconnected"),
             mounted=str(self.paths.mounts / connection["name"]) in mounts)
             for connection in state["connections"]]
+        for connection in state["connections"]:
+            identity = connection["id"]
+            if identity in self.runtime:
+                self.runtime[identity]["retryAt"] = (self.retry.get(identity)
+                    if connection.get("desiredConnected") and identity not in self.children else None)
         self.publish()
         return not (state.get("shutdown") and not self.children and not self.ejections and not self.sidebar_processes
                     and not any(str(self.paths.mounts / c["name"]) in mounts for c in state["connections"]))
@@ -2302,6 +2312,7 @@ def status(paths):
                     state=live.get("state", "disconnected") if running else "disconnected",
                     message=live.get("message", "") if running else "", mountPath=str(paths.mounts / connection["name"]),
                     updatedAt=live.get("updatedAt", connection.get("updatedAt", 0)))
+        item["retryAt"] = live.get("retryAt") if running and item["desiredConnected"] else None
         item["events"] = activity_events(paths, connection["id"])
         item["mounted"] = item["mountPath"] in mounted
         # Finder can eject between supervisor ticks. Only describe sidebar state
@@ -2351,6 +2362,7 @@ def parser():
     result.add_argument("--resource-dir")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("recover-connections")
     commands.add_parser("export-connection").add_argument("id")
     commands.add_parser("inspect-connection")
     commands.add_parser("export-setup").add_argument("id")
@@ -2379,7 +2391,7 @@ def parser():
         browsing.add_argument("--fast-browsing", action="store_true", dest="fast_browsing")
         browsing.add_argument("--precise-browsing", action="store_false", dest="fast_browsing")
         operation.set_defaults(fast_browsing=None)
-    for command in ("remove", "connect", "disconnect", "login", "refresh", "reconnect", "cache-info", "clear-cache"):
+    for command in ("remove", "connect", "disconnect", "login", "refresh", "reconnect", "cache-info", "clear-cache", "upload-status", "retry-uploads"):
         commands.add_parser(command).add_argument("id")
     rename = commands.add_parser("rename")
     rename.add_argument("id")
@@ -2436,6 +2448,28 @@ def action(args, paths):
     store = Store(paths)
     if args.command == "status":
         return status(paths)
+    if args.command in ("upload-status", "retry-uploads"):
+        import upload_status
+        connection = find_connection(store.read(), args.id)
+        live = store.runtime().get("connections", {}).get(args.id, {})
+        mounted = str(paths.mounts / connection["name"]) in mount_table()
+        if args.command == "upload-status":
+            return upload_status.snapshot(connection, paths, live, mounted, remote_control_post)
+        assert_no_update(store.read())
+        return upload_status.retry(connection, live, mounted, remote_control_post)
+    if args.command == "recover-connections":
+        mounted = mount_table()
+        requested = False
+        with store.update() as state:
+            if not state.get("shutdown") and not state.get("updateHandoff"):
+                for connection in state["connections"]:
+                    if (connection.get("desiredConnected") and not connection.get("reconnectRequested")
+                            and str(paths.mounts / connection["name"]) not in mounted):
+                        connection["revision"] = connection.get("revision", 0) + 1
+                        requested = True
+        if requested:
+            ensure_service(paths)
+        return {"ok": True}
     if args.command == "cache-info":
         return cache_info(find_connection(store.read(), args.id), paths)
     paths.prepare()

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import Network
 import FinderSync
 import os
 
@@ -84,6 +85,7 @@ struct Connection: Codable, Identifiable, Equatable {
     var knownHostsFile: String?
     var passwordConfigured: Bool?
     var events: [DriveEvent]? = nil
+    var retryAt: Double? = nil
 
     var isSFTP: Bool { backend == "sftp" }
     var supportsPhotoBrowser: Bool { !isSFTP }
@@ -159,9 +161,23 @@ struct TurtleError: LocalizedError {
 }
 
 enum ServiceClient {
-    static let pythonPath: String? = {
-        for candidate in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"] {
+    private static let pythonLock = NSLock()
+    private static var cachedPython: String?
+    static var pythonPath: String? {
+        pythonLock.lock()
+        defer { pythonLock.unlock() }
+        if let cachedPython, FileManager.default.isExecutableFile(atPath: cachedPython) { return cachedPython }
+        cachedPython = workingPython(candidates: ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"])
+        return cachedPython
+    }
+
+    static func workingPython(candidates: [String]) -> String? {
+        for candidate in candidates {
             guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+            // The system launcher can prompt to install developer tools on a new Mac.
+            if candidate == "/usr/bin/python3",
+               !FileManager.default.isExecutableFile(atPath: "/Library/Developer/CommandLineTools/usr/bin/python3"),
+               !FileManager.default.isExecutableFile(atPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/python3") { continue }
             let probe = Process()
             probe.executableURL = URL(fileURLWithPath: candidate)
             probe.arguments = ["-c", "import sys, plistlib, ssl, fcntl; sys.exit(0 if sys.version_info >= (3, 9) else 1)"]
@@ -171,7 +187,24 @@ enum ServiceClient {
             catch { continue }
         }
         return nil
-    }()
+    }
+
+    static func nativeSetupDependencies() async -> Dependencies {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var result = Dependencies()
+                result.python = pythonPath
+                result.brew = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first {
+                    FileManager.default.isExecutableFile(atPath: $0)
+                }
+                let app = Bundle.main.bundleURL.standardizedFileURL.path
+                result.appPath = app
+                result.appInstalled = app.hasPrefix("/Applications/") || app.hasPrefix(
+                    FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path + "/")
+                continuation.resume(returning: result)
+            }
+        }
+    }
 
     static var resources: URL {
         Bundle.main.resourceURL ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
@@ -217,7 +250,7 @@ enum ServiceClient {
             eval "$(/usr/local/bin/brew shellenv)"
           fi
         fi
-        brew install \(includeAWS ? "awscli rclone" : "rclone")
+        brew install \(includeAWS ? "python awscli rclone" : "python rclone")
         echo
         echo "Mountain Turtle tools are installed. Return to Mountain Turtle and refresh setup."
         read -r -p "Press Return to close this window. "
@@ -242,7 +275,7 @@ enum ServiceClient {
                 let output = Pipe()
                 let command = """
                 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                brew install \(includeAWS ? "awscli rclone" : "rclone")
+                brew install \(includeAWS ? "python awscli rclone" : "python rclone")
                 """
                 process.executableURL = URL(fileURLWithPath: "/bin/zsh")
                 process.arguments = ["-lc", command]
@@ -332,22 +365,47 @@ enum ServiceClient {
     @Published var otherSheetPresented = false
     private var refreshing = false
     private var timer: Timer?
+    private var networkMonitor: NWPathMonitor?
+    private var wakeObserver: NSObjectProtocol?
+    private var networkWasUnavailable = false
+
 
     var selected: Connection? { connections.first { $0.id == selectedID } }
     var connectedCount: Int { connections.filter(\.isConnected).count }
     var requiresAWS: Bool { connections.contains { !$0.isSFTP } }
-    var missingTools: Bool { !isLoading && ((!dependencies.awsReady && requiresAWS) || !dependencies.rcloneReady) }
+    var missingTools: Bool { !isLoading && (dependencies.python == nil || (!dependencies.awsReady && requiresAWS) || !dependencies.rcloneReady) }
     var setupNeedsAttention: Bool {
-        !isLoading && serviceError == nil && (!dependencies.installedReady || (requiresAWS && !dependencies.awsReady)
+        !isLoading && (dependencies.python == nil || !dependencies.installedReady || (requiresAWS && !dependencies.awsReady)
             || !dependencies.rcloneReady || dependencies.privacyState == "needsApproval")
     }
 
     func start() {
         guard timer == nil else { return }
         Task { await refresh() }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+                Task { @MainActor in await self.recoverConnections() }
+            }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { path in
+            let available = path.status == .satisfied
+            Task { @MainActor in
+                let restored = available && self.networkWasUnavailable
+                self.networkWasUnavailable = !available
+                if restored { await self.recoverConnections() }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "io.mountainturtle.network"))
+        networkMonitor = monitor
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
             Task { @MainActor in await self.refresh() }
         }
+    }
+
+    private func recoverConnections() async {
+        guard activeAction == nil else { return }
+        _ = try? await ServiceClient.run(["recover-connections"])
+        await refresh()
     }
 
     func refresh() async {
@@ -366,7 +424,10 @@ enum ServiceClient {
                 selectedID = connections.first?.id
             }
             serviceError = nil
-        } catch { serviceError = error.localizedDescription }
+        } catch {
+            serviceError = error.localizedDescription
+            dependencies = await ServiceClient.nativeSetupDependencies()
+        }
     }
 
     @discardableResult func action(_ args: [String], standardInput: Data? = nil) async -> Bool {
@@ -548,12 +609,12 @@ struct MainView: View {
                 if let message = model.serviceError {
                     notice(message, symbol: "exclamationmark.triangle", color: .orange).padding(.horizontal, 32).padding(.bottom, 16)
                 }
-                if model.missingTools && model.serviceError == nil {
+                if model.missingTools {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "shippingbox").foregroundStyle(moss)
                         VStack(alignment: .leading, spacing: 5) {
                             Text("A little setup first").fontWeight(.semibold)
-                            Text("Install rclone to connect drives. S3 connections also use AWS CLI.").foregroundStyle(.secondary)
+                            Text("Install the tools needed to connect drives. S3 connections also use AWS CLI.").foregroundStyle(.secondary)
                             Button("Open setup") { showSetup = true }.buttonStyle(.link)
                         }
                     }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(cream).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 32)
@@ -579,7 +640,7 @@ struct MainView: View {
             }
         }
         .sheet(isPresented: $showAdd) { ConnectionEditor(model: model, original: nil) }
-        .sheet(isPresented: $showSetup) { SetupView(model: model) }
+        .sheet(isPresented: $showSetup) { SetupView(model: model) { showSetup = false; showAdd = true } }
         .sheet(item: $editing) { ConnectionEditor(model: model, original: $0) }
         .sheet(item: $model.transferRequest) { request in
             switch request.kind {
@@ -752,6 +813,15 @@ struct MainView: View {
                 if let message = connection.message, !message.isEmpty {
                     notice(message, symbol: connection.state == "error" || connection.state == "needsLogin" ? "exclamationmark.circle" : "info.circle", color: connection.state == "error" || connection.state == "needsLogin" ? .orange : moss)
                 }
+                if let retryAt = connection.retryAt, connection.desiredConnected, !connection.isMounted {
+                    HStack {
+                        Text("Automatic retry in \(max(0, Int(ceil(retryAt - Date().timeIntervalSince1970)))) seconds")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Button("Retry now") { Task { await model.action(["connect", connection.id]) } }
+                            .disabled(model.activeAction != nil)
+                    }
+                }
+                UploadStatusView(model: model, connection: connection)
                 if let message = connection.sidebarError, !message.isEmpty {
                     notice(message, symbol: "sidebar.left", color: .orange)
                 }
@@ -931,6 +1001,7 @@ private enum SetupState {
 
 struct SetupView: View {
     @ObservedObject var model: AppModel
+    var onAddConnection: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var installing = false
     @State private var installLog = ""
@@ -938,7 +1009,7 @@ struct SetupView: View {
     @State private var message: String?
 
     private var needsToolInstall: Bool {
-        (includeAWS && !model.dependencies.awsReady) || !model.dependencies.rcloneReady
+        model.dependencies.python == nil || (includeAWS && !model.dependencies.awsReady) || !model.dependencies.rcloneReady
     }
 
     var body: some View {
@@ -955,6 +1026,10 @@ struct SetupView: View {
                 setupRow("Mountain Turtle in Applications",
                          detail: model.dependencies.installedReady ? (model.dependencies.appPath ?? "Installed") : "Move the app into your Applications folder before using login restore.",
                          state: model.dependencies.installedReady ? .ready : .problem)
+                Divider().padding(.leading, 42)
+                setupRow("Python runtime",
+                         detail: model.dependencies.python == nil ? "Install the tools below to enable connection checks." : "Ready",
+                         state: model.dependencies.python == nil ? .problem : .ready)
                 Divider().padding(.leading, 42)
                 setupRow("AWS CLI v2",
                          detail: model.dependencies.awsReady ? (model.dependencies.awsVersion ?? "Installed") : "Only needed for S3 drives. SFTP works without AWS CLI.",
@@ -981,7 +1056,9 @@ struct SetupView: View {
                         Label(model.dependencies.brew == nil ? "Install Homebrew & tools" : "Install tools", systemImage: "shippingbox")
                     }.buttonStyle(.borderedProminent).disabled(installing)
                 }
-                Button { ServiceClient.openPrivacySettings() } label: { Label("Open Privacy Settings", systemImage: "lock.shield") }
+                if model.dependencies.privacyState == "needsApproval" {
+                    Button { ServiceClient.openPrivacySettings() } label: { Label("Open Privacy Settings", systemImage: "lock.shield") }
+                }
                 Spacer()
                 Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
             }.controlSize(.large)
@@ -1006,6 +1083,10 @@ struct SetupView: View {
             HStack {
                 Button("Setup guide") { model.openGuide() }
                 Spacer()
+                if !needsToolInstall && model.dependencies.installedReady && model.connections.isEmpty,
+                   let onAddConnection {
+                    Button("Add your first drive") { onAddConnection() }.buttonStyle(.borderedProminent)
+                }
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 640).tint(moss)

@@ -48,6 +48,12 @@ class ConnectionTransferNativeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "PASS " + name)
 
+    def test_setup_remains_available_without_python_and_aws_is_optional_for_sftp(self):
+        self.run_case("setup_readiness")
+
+    def test_python_can_be_discovered_after_install_without_relaunch(self):
+        self.run_case("python_discovery")
+
     def test_inspection_rejects_empty_and_oversized_before_subprocess(self):
         self.run_case("inspection_limits")
 
