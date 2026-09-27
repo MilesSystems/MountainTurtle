@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import UniformTypeIdentifiers
+import Darwin
 
 private struct FileTreeEntry: Decodable {
     let name: String
@@ -19,6 +20,16 @@ private final class FileTreeRequest: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var cancelled = false
+    static func readChunk(_ handle: FileHandle) throws -> Data {
+        // FileHandle.read(upToCount:) fills its requested buffer on a pipe.
+        // One POSIX read returns the first available bytes of a listing page.
+        var bytes = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = bytes.withUnsafeMutableBytes { Darwin.read(handle.fileDescriptor, $0.baseAddress, $0.count) }
+            if count >= 0 { return Data(bytes.prefix(count)) }
+            if errno != EINTR { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        }
+    }
     func start(_ value: Process) throws {
         lock.lock(); defer { lock.unlock() }
         if cancelled { throw CancellationError() }
@@ -104,7 +115,9 @@ private final class FileTreeRequest: @unchecked Sendable {
                 process.standardError = FileHandle.nullDevice
                 try request.start(process)
                 var buffer = Data(), completed = false, receivedError = false
-                while let chunk = try output.fileHandleForReading.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                while true {
+                    let chunk = try FileTreeRequest.readChunk(output.fileHandleForReading)
+                    if chunk.isEmpty { break }
                     buffer.append(chunk)
                     // A page has at most 256 names. Reject an invalid/unbounded response.
                     if buffer.count > 4 * 1024 * 1024 { process.terminate(); throw TurtleError(message: "The folder response was too large.") }

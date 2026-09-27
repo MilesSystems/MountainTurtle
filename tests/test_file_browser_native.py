@@ -21,6 +21,18 @@ struct Connection { let id: String; let name: String; let mountPath: String; let
 enum ServiceClient { static let resources = URL(fileURLWithPath: "/nonexistent"); static let pythonPath: String? = nil }
 @main struct OutlineTest {
     @MainActor static func main() {
+        let pipe = Pipe(), firstRead = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            pipe.fileHandleForWriting.write(Data("first\n".utf8))
+            _ = firstRead.wait(timeout: .now() + 2)
+            pipe.fileHandleForWriting.write(Data("second\n".utf8))
+            try! pipe.fileHandleForWriting.close()
+        }
+        let first = try! FileTreeRequest.readChunk(pipe.fileHandleForReading)
+        precondition(String(data: first, encoding: .utf8) == "first\n", "First page buffered until later pages or EOF")
+        firstRead.signal()
+        precondition(String(data: try! FileTreeRequest.readChunk(pipe.fileHandleForReading), encoding: .utf8) == "second\n")
+        precondition(try! FileTreeRequest.readChunk(pipe.fileHandleForReading).isEmpty)
         let model = FileTreeModel(connection: Connection(id: "fixture", name: "Fixture", mountPath: "/nonexistent", isConnected: false))
         let folder = FileTreeNode(key: "large", name: "Large folder", directory: true, parent: model.root)
         model.root.children = [folder]; model.root.loaded = true
