@@ -54,16 +54,18 @@ private final class LocalOnlySessionDelegate: NSObject, URLSessionTaskDelegate {
 }
 
 private enum Badge: String, CaseIterable {
-    case online, cached, partial, pending, loading, downloading, error, unknown
+    case online, cached, empty, partial, pending, loading, downloading, downloaded, error, unknown
 
     var label: String {
         switch self {
         case .online: return "Online only"
         case .cached: return "Cached on this Mac"
+        case .empty: return "Empty cached file (0 bytes)"
         case .partial: return "Partially cached"
         case .pending: return "Waiting to upload"
         case .loading: return "Loading folder"
         case .downloading: return "Keeping folder downloaded"
+        case .downloaded: return "Folder download finished"
         case .error: return "Needs attention"
         case .unknown: return "Status unavailable"
         }
@@ -72,6 +74,7 @@ private enum Badge: String, CaseIterable {
     var color: NSColor {
         switch self {
         case .cached: return NSColor(srgbRed: 0.04, green: 0.70, blue: 0.38, alpha: 1)
+        case .empty, .downloaded: return .secondaryLabelColor
         case .pending: return NSColor(srgbRed: 0.12, green: 0.58, blue: 0.91, alpha: 1)
         case .loading: return NSColor(srgbRed: 0.20, green: 0.50, blue: 0.78, alpha: 1)
         case .downloading: return NSColor(srgbRed: 0.13, green: 0.46, blue: 0.76, alpha: 1)
@@ -86,10 +89,12 @@ private enum Badge: String, CaseIterable {
         switch self {
         case .online: return "cloud"
         case .cached: return "checkmark"
+        case .empty: return "minus"
         case .partial: return "circle.lefthalf.filled"
         case .pending: return "arrow.triangle.2.circlepath"
         case .loading: return "arrow.clockwise"
         case .downloading: return "chart.pie.fill"
+        case .downloaded: return "arrow.down"
         case .error: return "exclamationmark"
         case .unknown: return "questionmark"
         }
@@ -145,7 +150,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var currentBadges: [String: Badge] = [:]
     private var loadingFolders: [String: Date] = [:]
     private var folderRefreshRequests: [String: Date] = [:]
-    private var folderPrefetchRequests: [String: Date] = [:]
     private var bridge: Bridge?
     private var timer: Timer?
     private var refreshing = false
@@ -158,7 +162,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var nextActionTag = 1
     private let folderLoadingDuration: TimeInterval = 6
     private let folderRemoteRefreshInterval: TimeInterval = 20
-    private let folderOpenPrefetchInterval: TimeInterval = 90
 
     override init() {
         super.init()
@@ -175,7 +178,8 @@ final class MountainTurtleFinderSync: FIFinderSync {
         observed.insert(path)
         markFolderLoading(path)
         requestRemoteFolderRefresh(path)
-        requestOpenFolderPrefetch(path)
+        // Listing a folder must not download its originals. Explicit Keep
+        // Downloaded requests still use the folder-cache action.
         scheduleRefresh()
     }
 
@@ -189,7 +193,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 serviceBadges.removeValue(forKey: path)
                 loadingFolders.removeValue(forKey: path)
                 folderRefreshRequests.removeValue(forKey: path)
-                folderPrefetchRequests.removeValue(forKey: path)
             }
         }
         requestOrder.removeAll { requested[$0] == nil }
@@ -214,7 +217,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
             serviceBadges.removeValue(forKey: oldest)
             loadingFolders.removeValue(forKey: oldest)
             folderRefreshRequests.removeValue(forKey: oldest)
-            folderPrefetchRequests.removeValue(forKey: oldest)
         }
         let serviceBadge = Date().timeIntervalSince(lastSuccessfulBadges) < 10 ? serviceBadges[path] ?? .unknown : .unknown
         let badge = displayBadge(for: path, serviceBadge: serviceBadge)
@@ -262,6 +264,11 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 status.image = badge.image
                 status.isEnabled = false
                 menu.addItem(status)
+                if badge == .downloaded {
+                    let detail = NSMenuItem(title: "Current offline availability is not verified", action: nil, keyEquivalent: "")
+                    detail.isEnabled = false
+                    menu.addItem(detail)
+                }
             }
             menu.addItem(.separator())
             if selected.count == 1, let url = selected.first, root.mounted, isDirectory(url) {
@@ -447,7 +454,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 markFolderLoading(current)
                 // Badge requests also arrive for every displayed child. They
                 // are not evidence that an ancestor was opened or changed.
-                // Refresh/prefetch only the folders Finder actually observes.
+                // Refresh only the folders Finder actually observes.
             }
             let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
             if parent == current { break }
@@ -463,18 +470,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
         guard let descriptor = bridge ?? readBridge(),
               let body = try? JSONSerialization.data(withJSONObject: ["path": path]) else { return }
         request(path: "v1/folder-refresh", descriptor: descriptor, body: body) { [weak self] _ in
-            self?.scheduleRefresh()
-        }
-    }
-
-    private func requestOpenFolderPrefetch(_ path: String) {
-        guard roots.contains(where: { contains(path, in: $0.mountPath) }) else { return }
-        let now = Date()
-        if let retryAfter = folderPrefetchRequests[path], retryAfter > now { return }
-        folderPrefetchRequests[path] = now.addingTimeInterval(folderOpenPrefetchInterval)
-        guard let descriptor = bridge ?? readBridge(),
-              let body = try? JSONSerialization.data(withJSONObject: ["path": path]) else { return }
-        request(path: "v1/folder-prefetch", descriptor: descriptor, body: body) { [weak self] _ in
             self?.scheduleRefresh()
         }
     }
@@ -573,7 +568,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 if changed {
                     for path in self.observed where self.roots.contains(where: { self.contains(path, in: $0.mountPath) }) {
                         self.requestRemoteFolderRefresh(path)
-                        self.requestOpenFolderPrefetch(path)
                     }
                 }
                 let removed = self.requested.keys.filter { path in
@@ -587,7 +581,6 @@ final class MountainTurtleFinderSync: FIFinderSync {
                     self.serviceBadges.removeValue(forKey: path)
                     self.loadingFolders.removeValue(forKey: path)
                     self.folderRefreshRequests.removeValue(forKey: path)
-                    self.folderPrefetchRequests.removeValue(forKey: path)
                 }
                 self.requestOrder.removeAll { self.requested[$0] == nil }
                 self.refreshBadges(descriptor: descriptor)

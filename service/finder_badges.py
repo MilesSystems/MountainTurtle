@@ -165,7 +165,9 @@ def _folder_cache_badge(paths, connection, relative):
         if state in ("queued", "warming"):
             return "downloading"
         if state == "complete":
-            return "cached"
+            # A completed traversal is history, not proof that every child is
+            # still in rclone's evictable cache (or that remote contents exist).
+            return "downloaded"
         if state == "error":
             return "error"
         return "unknown"
@@ -221,7 +223,7 @@ def badge_for_path(paths, connections, requested_path):
         if not valid or data_size != info["Size"]:
             return "unknown"
         if complete:
-            return "cached"
+            return "empty" if data_size == 0 else "cached"
         return "partial" if any_bytes else "online"
     except (KeyError, TypeError, ValueError, OSError):
         return "unknown"

@@ -79,7 +79,7 @@ class BadgeTests(unittest.TestCase):
         self.cache(self.complete())
         self.assertEqual(self.state(), "cached")
         self.cache({"Size": 0, "Dirty": False, "Rs": None}, size=0, name="empty")
-        self.assertEqual(self.state("empty"), "cached")
+        self.assertEqual(self.state("empty"), "empty")
 
     def test_sparse_ranges_are_partial_not_a_completed_size(self):
         self.cache(self.complete(Rs=[{"Pos": 0, "Size": 3}, {"Pos": 7, "Size": 3}]))
@@ -134,10 +134,25 @@ class BadgeTests(unittest.TestCase):
 
     def test_folder_cache_rules_badge_the_selected_folder(self):
         for state, expected in (("queued", "downloading"), ("warming", "downloading"),
-                                ("complete", "cached"), ("error", "error")):
+                                ("complete", "downloaded"), ("error", "error")):
             with self.subTest(state=state):
                 self.folder_cache("Needs-Review", state=state)
                 self.assertEqual(self.state("Needs-Review"), expected)
+
+    def test_completed_folder_does_not_claim_uncached_or_evicted_children_are_cached(self):
+        self.folder_cache("Raw", state="complete")
+        self.assertEqual(self.state("Raw"), "downloaded")
+        self.assertEqual(self.state("Raw/photo.jpg"), "online")
+        meta, data = self.cache(self.complete(), name="Raw/photo.jpg")
+        self.assertEqual(self.state("Raw/photo.jpg"), "cached")
+        meta.unlink()
+        data.unlink()
+        self.assertEqual(self.state("Raw"), "downloaded")
+        self.assertEqual(self.state("Raw/photo.jpg"), "online")
+
+    def test_empty_dirty_file_still_reports_pending_upload(self):
+        self.cache({"Size": 0, "Dirty": True, "Rs": None}, size=0)
+        self.assertEqual(self.state(), "pending")
 
     def test_expired_and_removed_folder_cache_rules_do_not_badge_the_folder(self):
         self.folder_cache("Needs-Review", state="warming", keep_until=1)

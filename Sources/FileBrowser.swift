@@ -36,6 +36,8 @@ private final class FileTreeRequest: @unchecked Sendable {
     let key: String
     let name: String
     let directory: Bool
+    let placeholder: Bool
+    lazy var loadingRow = FileTreeNode(key: key + "/\0loading", name: "Loading…", directory: false, parent: self, placeholder: true)
     var size: Int64
     var modified: Double
     weak var parent: FileTreeNode?
@@ -46,8 +48,8 @@ private final class FileTreeRequest: @unchecked Sendable {
     var request: FileTreeRequest?
     var generation = UUID()
     var received = Set<String>()
-    init(key: String, name: String, directory: Bool, size: Int64 = 0, modified: Double = 0, parent: FileTreeNode? = nil) {
-        self.key = key; self.name = name; self.directory = directory
+    init(key: String, name: String, directory: Bool, size: Int64 = 0, modified: Double = 0, parent: FileTreeNode? = nil, placeholder: Bool = false) {
+        self.key = key; self.name = name; self.directory = directory; self.placeholder = placeholder
         self.size = size; self.modified = modified; self.parent = parent
     }
 }
@@ -220,18 +222,29 @@ private struct FileTreeTable: NSViewRepresentable {
         static let dateFormatter: DateFormatter = { let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f }()
         init(_ model: FileTreeModel) { self.model = model }
         func children(_ item: Any?) -> [FileTreeNode] {
-            let nodes = (item as? FileTreeNode ?? model.root).children
+            let parent = item as? FileTreeNode ?? model.root
+            let nodes = parent.children
+            // Keep the expanded state visible while the folder has no real
+            // children yet, until the first page or successful EOF arrives.
+            if nodes.isEmpty && !parent.loaded && parent.directory { return [parent.loadingRow] }
             return ascending ? nodes : nodes.reversed()
         }
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int { children(item).count }
         func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { children(item)[index] }
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { (item as? FileTreeNode)?.directory == true }
         func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
-            if !restoring, let node = item as? FileTreeNode { model.load(node) }
-            return true
+            // AppKit/accessibility can ask whether expansion is allowed without
+            // actually expanding. Start remote work only after a real expansion.
+            (item as? FileTreeNode)?.directory == true
+        }
+        func outlineViewItemDidExpand(_ notification: Notification) {
+            if !restoring, let node = notification.userInfo?["NSObject"] as? FileTreeNode { model.load(node) }
         }
         func outlineViewItemDidCollapse(_ notification: Notification) {
             if !restoring, let node = notification.userInfo?["NSObject"] as? FileTreeNode { model.cancel(node) }
+        }
+        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+            (item as? FileTreeNode)?.placeholder == false
         }
         func outlineViewSelectionDidChange(_ notification: Notification) {
             guard !restoring, let table else { return }
@@ -302,9 +315,10 @@ private struct FileTreeTable: NSViewRepresentable {
                 let ext = (node.name as NSString).pathExtension
                 value = node.directory ? "Folder" : UTType(filenameExtension: ext)?.localizedDescription ?? "Document"
             }
+            if node.placeholder { value = id == "name" ? (node.parent?.error ?? "Loading…") : "" }
             cell.textField?.stringValue = value
-            cell.textField?.textColor = id == "name" ? .labelColor : .secondaryLabelColor
-            cell.imageView?.image = NSImage(named: node.directory ? NSImage.folderName : NSImage.multipleDocumentsName)
+            cell.textField?.textColor = id == "name" && !node.placeholder ? .labelColor : .secondaryLabelColor
+            cell.imageView?.image = node.placeholder ? nil : NSImage(named: node.directory ? NSImage.folderName : NSImage.multipleDocumentsName)
             cell.toolTip = node.error ?? node.name
             return cell
         }
