@@ -690,7 +690,8 @@ class ServiceTests(unittest.TestCase):
                                                        "remoteControl": rc}
         with patch.object(turtle, "mount_table", return_value={str(self.paths.mounts / self.connection["name"])}), \
              patch.object(turtle, "start_directory_refresh", return_value={"jobid": 7}) as refresh, \
-             patch.object(turtle.LISTING_MONITORS, "acquire", return_value=False), \
+             patch.object(turtle.threading, "Thread"), \
+             patch.object(turtle, "LISTING_MONITORS", turtle.threading.BoundedSemaphore(8)), \
              patch.object(turtle.subprocess, "Popen") as start:
             supervisor.tick()
             supervisor.tick()
@@ -710,7 +711,9 @@ class ServiceTests(unittest.TestCase):
         folder = str(self.paths.mounts / self.connection["name"] / "2025" / "Raw")
         with patch.object(turtle, "mount_table", return_value=mounted), \
              patch.object(turtle, "start_directory_refresh", return_value={"jobid": 9}) as refresh, \
-             patch.object(turtle.LISTING_MONITORS, "acquire", return_value=False), \
+             patch.object(turtle.threading, "Thread"), \
+             patch.object(turtle, "LISTING_MONITORS", turtle.threading.BoundedSemaphore(8)), \
+             patch.object(turtle, "remote_control_post", return_value={"finished": True}), \
              patch.object(turtle.time, "monotonic", side_effect=[100, 105, 121]):
             self.assertFalse(supervisor.request_folder_refresh({"path": folder})["throttled"])
             self.assertTrue(supervisor.request_folder_refresh({"path": folder})["throttled"])

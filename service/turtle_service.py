@@ -759,17 +759,23 @@ def start_directory_refresh(remote_control, directory=None, recursive=True):
 LISTING_MONITORS = threading.BoundedSemaphore(8)
 
 
-def observed_directory_refresh(paths, connection, remote_control, directory=None, recursive=True):
+def observed_directory_refresh(paths, connection, remote_control, directory=None, recursive=True, finished=None):
     import operation_activity as activity
+    # Reserve monitoring capacity before launching work. Otherwise every Finder
+    # callback can leave an untracked rclone job holding directory-tree locks.
+    if not LISTING_MONITORS.acquire(blocking=False):
+        return {"throttled": True}
     identity = activity.start(paths, connection['id'], 'list', directory or '/')
     began = time.perf_counter()
     try:
         result = start_directory_refresh(remote_control, directory, recursive=recursive) if directory is not None else start_directory_refresh(remote_control, recursive=recursive)
     except Exception:
+        LISTING_MONITORS.release()
         activity.finish(paths, identity, 'failed', time.perf_counter() - began)
         raise
     job = result.get('jobid')
-    if type(job) is not int or not LISTING_MONITORS.acquire(blocking=False):
+    if type(job) is not int:
+        LISTING_MONITORS.release()
         activity.finish(paths, identity, 'unknown', time.perf_counter() - began)
         return result
 
@@ -779,6 +785,8 @@ def observed_directory_refresh(paths, connection, remote_control, directory=None
             for _ in range(900):
                 status = remote_control_post(remote_control, 'job/status', {'jobid': job}, timeout=1)
                 if status.get('finished') is True:
+                    if finished is not None:
+                        finished.set()
                     output = status.get('output', {}).get('result') if isinstance(status.get('output'), dict) else None
                     if status.get('success') is False:
                         outcome = 'failed'
@@ -1625,6 +1633,41 @@ class Supervisor:
         return folder_cache_request(self.paths, self.store.read()["connections"], body.get("path"),
                                     body.get("mode"), body.get("seconds"), mounted=mount_table())
 
+    def refresh_directory(self, connection, child, directory=None, recursive=True):
+        # A refresh takes child-directory locks while holding its parent's lock.
+        # Overlapping refreshes can therefore spread one slow listing all the
+        # way to the drive root. Keep at most one job per mount generation,
+        # including after monitoring times out or loses its HTTP connection.
+        lock = child.setdefault("listingLock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            return {"throttled": True}
+        try:
+            previous = child.get("listingJob")
+            completed = child.get("listingFinished")
+            if previous is not None and not (completed is not None and completed.is_set()):
+                if type(previous) is not int:
+                    return {"throttled": True}
+                try:
+                    status = remote_control_post(child["remoteControl"], "job/status",
+                                                 {"jobid": previous}, timeout=1)
+                except (OSError, ValueError, TypeError):
+                    return {"throttled": True}
+                if status.get("finished") is not True:
+                    return {"throttled": True}
+            # An HTTP timeout does not prove rclone rejected the job. Do not
+            # enqueue more work on that mount until completion can be confirmed.
+            child["listingJob"] = "unconfirmed"
+            finished = child["listingFinished"] = threading.Event()
+            result = observed_directory_refresh(self.paths, connection, child["remoteControl"],
+                                                directory, recursive=recursive, finished=finished)
+            if result.get("throttled"):
+                child.pop("listingJob", None)
+            elif type(result.get("jobid")) is int:
+                child["listingJob"] = result["jobid"]
+            return result
+        finally:
+            lock.release()
+
     def request_folder_refresh(self, body):
         if not isinstance(body, dict):
             raise ValueError("Invalid folder refresh request")
@@ -1643,11 +1686,12 @@ class Supervisor:
             keep = dict(sorted(self.folder_refreshes.items(), key=lambda item: item[1])[-384:])
             self.folder_refreshes = keep
         try:
-            observed_directory_refresh(self.paths, connection, child["remoteControl"], relative, recursive=False)
+            result = self.refresh_directory(connection, child, relative, recursive=False)
         except Exception:
             logging.warning("Could not refresh Finder folder listing for %s", connection["id"], exc_info=True)
             return {"ok": False, "message": "Folder listing refresh is unavailable right now."}
-        return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": False}
+        return {"ok": True, "connectionID": connection["id"], "relativePath": relative,
+                "throttled": bool(result.get("throttled"))}
 
     def request_open_folder_prefetch(self, body):
         if not isinstance(body, dict):
@@ -2077,15 +2121,13 @@ class Supervisor:
                     self.start_sidebar(connection, child)
                 if connection.get("refreshRequested") and now - child["started"] >= 5:
                     try:
-                        observed_directory_refresh(self.paths, connection, child["remoteControl"], recursive=True)
+                        self.refresh_directory(connection, child, recursive=True)
                     except ProcessLookupError:
                         continue  # The next tick handles the process exit and normal backoff.
                     except Exception:
                         logging.warning("Could not refresh folder listings for %s", identity, exc_info=True)
-                        try:
-                            child["process"].send_signal(signal.SIGHUP)
-                        except ProcessLookupError:
-                            continue  # The next tick handles the process exit and normal backoff.
+                        # A timed-out request may still be running. SIGHUP would
+                        # invalidate the tree and make Finder join the same stall.
                     with self.store.update() as current_state:
                         current = find_connection(current_state, identity)
                         if current.get("revision", 0) == connection.get("revision", 0):

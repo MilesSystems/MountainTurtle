@@ -445,8 +445,9 @@ final class MountainTurtleFinderSync: FIFinderSync {
         while current != root.mountPath && contains(current, in: root.mountPath) {
             if requested[current] != nil {
                 markFolderLoading(current)
-                requestRemoteFolderRefresh(current)
-                requestOpenFolderPrefetch(current)
+                // Badge requests also arrive for every displayed child. They
+                // are not evidence that an ancestor was opened or changed.
+                // Refresh/prefetch only the folders Finder actually observes.
             }
             let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
             if parent == current { break }
@@ -566,9 +567,14 @@ final class MountainTurtleFinderSync: FIFinderSync {
                 self.roots = response.roots.filter { $0.mountPath.hasPrefix("/") && $0.mountPath != "/" }
                 let urls = Set(self.roots.map { URL(fileURLWithPath: $0.mountPath, isDirectory: true) })
                 if urls != self.controller.directoryURLs { self.controller.directoryURLs = urls }
-                for path in self.observed where self.roots.contains(where: { self.contains(path, in: $0.mountPath) }) {
-                    self.requestRemoteFolderRefresh(path)
-                    self.requestOpenFolderPrefetch(path)
+                // Re-establish observations after a bridge restart. Routine
+                // badge polling must not repeatedly rescan every expanded
+                // ancestor while Finder is loading a slow child directory.
+                if changed {
+                    for path in self.observed where self.roots.contains(where: { self.contains(path, in: $0.mountPath) }) {
+                        self.requestRemoteFolderRefresh(path)
+                        self.requestOpenFolderPrefetch(path)
+                    }
                 }
                 let removed = self.requested.keys.filter { path in
                     !self.roots.contains(where: { self.contains(path, in: $0.mountPath) })

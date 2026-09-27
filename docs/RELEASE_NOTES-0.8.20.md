@@ -1,0 +1,4 @@
+- Prevent overlapping folder refreshes from spreading a slow child-directory listing to its parents and drive root. Only one background refresh can run per mounted drive at a time.
+- Stop per-file Finder badge requests and routine badge polling from repeatedly refreshing and prefetching ancestor folders. Opening a folder and explicit refresh still request fresh listings.
+- Reserve listing-monitor capacity before launching work, and keep uncertain jobs from spawning more refreshes after a timeout. Other drives can continue refreshing independently.
+- Preserve saved connections, credentials, cached files and pending writes. Large remote folders can still take time to list; this update removes redundant background work rather than changing the storage server.
