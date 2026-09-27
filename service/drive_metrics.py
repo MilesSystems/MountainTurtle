@@ -146,7 +146,7 @@ class LocalReader:
         self.live = live
 
     def read(self, method):
-        if method not in ("core/stats", "vfs/stats"):
+        if method not in ("core/stats", "vfs/queue"):
             raise MetricsError("Unsupported local metrics request.")
         port = self.live.get("rcPort")
         user, password = self.live.get("rcUser"), self.live.get("rcPass")
@@ -238,7 +238,7 @@ def snapshot(connection, paths, live=None, reader=None, now=None):
         live = turtle.Store(paths).runtime().get("connections", {}).get(connection["id"], {})
     reader = reader or LocalReader(live)
     core, vfs, failures = {}, {}, []
-    for method in ("core/stats", "vfs/stats"):
+    for method in ("core/stats", "vfs/queue"):
         try:
             result = reader.read(method)
             if not isinstance(result, dict):
@@ -246,7 +246,22 @@ def snapshot(connection, paths, live=None, reader=None, now=None):
             if method == "core/stats":
                 core = result
             else:
-                vfs = result
+                from upload_status import queue_counts
+                try:
+                    queued, active, retrying = queue_counts(result)
+                except (ValueError, TypeError):
+                    raise MetricsError("The upload queue is unavailable.") from None
+                vfs = {"diskCache": {"uploadsQueued": queued, "uploadsInProgress": active}}
+                # Never ask vfs/stats: its directory walk can hold the root lock
+                # behind a stalled listing and block otherwise healthy folders.
+                try:
+                    local = turtle.cache_info(connection, paths)
+                    if not local["partial"]:
+                        vfs["diskCache"].update(bytesUsed=local["usedBytes"], files=local["files"])
+                    else:
+                        failures.append(MetricsError("Local cache accounting is incomplete."))
+                except (OSError, ValueError):
+                    failures.append(MetricsError("Local cache accounting is unavailable."))
         except MetricsError as error:
             failures.append(error)
     point = history_point(core, vfs, connection, live, now)
@@ -255,9 +270,10 @@ def snapshot(connection, paths, live=None, reader=None, now=None):
     history = append_history(metric_directory(paths, connection), point)
     return {"ok": True, "connectionID": connection["id"], "provider": provider(connection),
             "timestamp": now, "status": status, "message": str(failures[0]) if failures else "Local drive metrics are live.",
-            "source": "rclone local control API", "current": point, "history": history,
+            "source": "rclone transfer counters, upload queue and bounded local cache accounting", "current": point, "history": history,
             "capabilities": {"directionalTransferBytes": False, "cloudStorage": provider(connection) == "s3"},
-            "assumptions": ["Transfer bytes are combined reads and writes reported by this mount process, not account-wide traffic.",
+            "assumptions": ["Cache usage is allocated local disk space, including metadata. Open-handle, cache-error and directory-tree counters are unavailable because reading them can block Finder behind slow folder listings.",
+                            "Transfer bytes are combined reads and writes reported by this mount process, not account-wide traffic.",
                             "Speed uses consecutive observed byte counters; it is unavailable after a reset or a sampling gap longer than 90 seconds.",
                             "History records dashboard observations only, retaining up to 720 samples from the last 24 hours. Cache is evictable and its configured limit is a target, not a hard capacity."]}
 

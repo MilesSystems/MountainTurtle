@@ -47,6 +47,25 @@ def dirty_cache(connection, paths, limit=10000, seconds=0.2):
     return count, complete
 
 
+def queue_counts(response):
+    """Queue inspection does not acquire rclone's directory-tree locks."""
+    queue = response.get('queue')
+    if not isinstance(queue, list):
+        raise ValueError('Upload queue unavailable')
+    seen, queued, active, retrying = set(), 0, 0, 0
+    for item in queue:
+        if (not isinstance(item, dict) or type(item.get('id')) is not int
+                or item['id'] < 0 or item['id'] in seen
+                or type(item.get('uploading')) is not bool
+                or type(item.get('tries')) is not int or item['tries'] < 0):
+            raise ValueError('Invalid upload queue')
+        seen.add(item['id'])
+        active += int(item['uploading'])
+        queued += int(not item['uploading'])
+        retrying += int(not item['uploading'] and item['tries'] > 0)
+    return queued, active, retrying
+
+
 def snapshot(connection, paths, live, mounted, post):
     dirty, complete = dirty_cache(connection, paths)
     result = dict(ok=True, connectionID=connection['id'], checkedAt=time.time(),
@@ -60,26 +79,20 @@ def snapshot(connection, paths, live, mounted, post):
         return result
     result['message'] = 'Could not read the live upload queue. Cached changes are preserved; check drive insights or try again.'
     try:
-        stats = post(live, 'vfs/stats', {}, timeout=1)
-        disk = stats.get('diskCache', {})
-        if not isinstance(disk, dict):
-            return result
-        queued, active, errors, in_use = (disk.get('uploadsQueued'), disk.get('uploadsInProgress'),
-                                         disk.get('erroredFiles'), stats.get('inUse'))
-        if not all(type(n) is int and n >= 0 for n in (queued, active, errors, in_use)):
-            return result
+        queue = post(live, 'vfs/queue', {}, timeout=1, max_response_bytes=1024 * 1024)
+        queued, active, retrying = queue_counts(queue)
         result.update(queued=queued, active=active, canRetry=queued > 0 and not connection['readOnly'])
-        if errors or disk.get('outOfSpace') is True:
-            result.update(state='attention', title='Cached files need attention',
-                          message='The cache reports errors or insufficient space. Keep cached files; review drive insights and retry queued uploads.')
+        if retrying:
+            result.update(state='attention', title='Uploads waiting to retry',
+                          message=f'{retrying} queued upload(s) have already been attempted. Keep the drive connected and retry when the server is available.')
         elif queued or active or dirty:
             result.update(state='pending', title='Changes waiting to upload',
                           message=f'{queued} queued · {active} uploading · {dirty} cached file(s) with changes. Keep the drive connected.')
-        elif complete and not in_use and disk.get('outOfSpace') is False:
-            result.update(state='clear', title='No pending uploads',
-                          message='The local cache and upload queue report no outstanding changes. This is not a backup verification.')
+        elif complete:
+            result.update(state='clear', title='No queued uploads',
+                          message='No upload jobs or dirty cached files were found. Open apps may still have unsaved changes; this is not a backup verification.')
         else:
-            result.update(message='Files are open or the local cache check is incomplete. Upload completion cannot be confirmed yet.')
+            result.update(message='The upload queue is empty, but the local cache check is incomplete. Upload completion cannot be confirmed yet.')
     except (OSError, ValueError, TypeError):
         pass
     return result

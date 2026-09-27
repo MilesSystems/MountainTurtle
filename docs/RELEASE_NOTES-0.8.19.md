@@ -1,0 +1,3 @@
+- Prevent upload-status polling and drive insights from blocking Finder behind a stalled folder listing. Both use the upload queue instead of directory-tree statistics.
+- Clarify that an empty upload queue does not prove an open app has saved its changes.
+- Show uploads waiting to retry using their actual queue attempts. Cache size uses bounded local disk accounting.

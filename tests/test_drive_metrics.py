@@ -51,7 +51,7 @@ class MetricsTests(unittest.TestCase):
 
     def snapshot(self, core=None, vfs=None, now=NOW, live=None):
         reader = Mock()
-        reader.read.side_effect = [core or {"bytes": 0, "speed": 0, "transfers": 0}, vfs or {"diskCache": {"bytesUsed": 0}}]
+        reader.read.side_effect = [core or {"bytes": 0, "speed": 0, "transfers": 0}, vfs or {"queue": []}]
         return metrics.snapshot(self.connection, self.paths, live or self.live, reader, now)
 
     def storage(self, response, rate=None):
@@ -104,19 +104,30 @@ class MetricsTests(unittest.TestCase):
         (directory / "history.json").write_text("broken JSON")
         self.assertEqual(len(self.snapshot()["history"]), 1)
 
-    def test_telemetry_preserves_partial_cache_and_drops_file_names(self):
+    def test_telemetry_uses_local_cache_and_queue_without_remote_names(self):
         reader = Mock()
         reader.read.side_effect = [metrics.MetricsError("Not available"),
-                                   {"diskCache": {"bytesUsed": 100, "files": 3, "uploadsQueued": 2,
-                                                  "uploadsInProgress": 1, "outOfSpace": True, "path": "/private/path"},
-                                    "metadataCache": {"files": 5, "dirs": 2}, "inUse": 4}]
-        result = metrics.snapshot(self.connection, self.paths, self.live, reader, NOW)
+                                   {"queue": [{"id": 1, "name": "/private/path", "uploading": False, "tries": 1},
+                                              {"id": 2, "uploading": True, "tries": 1}]}]
+        with patch.object(turtle, 'cache_info', return_value={'usedBytes': 100, 'files': 3, 'partial': False}):
+            result = metrics.snapshot(self.connection, self.paths, self.live, reader, NOW)
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["current"]["cacheBytes"], 100)
-        self.assertEqual(result["current"]["uploadsQueued"], 2)
-        self.assertTrue(result["current"]["cacheOutOfSpace"])
+        self.assertEqual(result["current"]["uploadsQueued"], 1)
+        self.assertEqual(result["current"]["uploadsInProgress"], 1)
+        self.assertIsNone(result["current"]["cacheOutOfSpace"])
+        self.assertIsNone(result["current"]["cacheInUse"])
+        self.assertIsNone(result["current"]["metadataFiles"])
         self.assertIsNone(result["current"]["transferredBytes"])
         self.assertNotIn("/private/path", json.dumps(result))
+        self.assertEqual([c.args[0] for c in reader.read.call_args_list], ['core/stats', 'vfs/queue'])
+
+    def test_partial_disk_scan_does_not_claim_complete_cache_usage(self):
+        with patch.object(turtle, 'cache_info', return_value={'usedBytes': 100, 'files': 3, 'partial': True}):
+            result = self.snapshot()
+        self.assertIsNone(result['current']['cacheBytes'])
+        self.assertIsNone(result['current']['cacheFiles'])
+        self.assertEqual(result['status'], 'partial')
 
     def test_disconnected_does_not_invent_zero_counters(self):
         result = metrics.snapshot(self.connection, self.paths, {}, now=NOW)
@@ -150,6 +161,8 @@ class MetricsTests(unittest.TestCase):
             self.assertIsInstance(build.call_args.args[1], metrics.NoRedirect)
         with self.assertRaises(metrics.MetricsError):
             metrics.LocalReader(self.live).read("core/quit")
+        with self.assertRaises(metrics.MetricsError):
+            metrics.LocalReader(self.live).read("vfs/stats")
         with self.assertRaises(metrics.MetricsError):
             metrics.LocalReader(dict(self.live, rcPort="5555")).read("core/stats")
 

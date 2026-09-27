@@ -56,9 +56,12 @@ the required packages.
 ## Upload status and recovery
 
 Each drive shows a local upload summary: queued and active uploads, cached changes,
-and cache errors. **No pending uploads** requires a complete local metadata check,
-an empty live upload queue, and no open files reported by rclone. It describes
-this drive's local write queue, not a remote backup or content verification.
+and uploads waiting to retry. **No queued uploads** requires a complete local
+metadata check and an empty live upload queue. Open apps may still have unsaved
+changes; this is not a remote backup or content verification. Status polling and
+drive insights avoid rclone's directory-tree statistics, which can lock Finder
+behind a slow folder listing. Cache usage comes from bounded local disk accounting;
+open-handle and directory-tree counters remain unavailable.
 Unavailable or incomplete checks remain explicitly unconfirmed. The card also
 shows the last completed transfer recorded in the activity history.
 

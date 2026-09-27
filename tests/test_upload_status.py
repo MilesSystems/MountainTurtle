@@ -19,8 +19,8 @@ class UploadTests(unittest.TestCase):
         self.connection = dict(id='drive', readOnly=False)
         self.root = self.paths.cache / 'drive/vfsMeta/volume'
         self.root.mkdir(parents=True)
-        self.stats = dict(inUse=0, diskCache=dict(uploadsQueued=0, uploadsInProgress=0, erroredFiles=0, outOfSpace=False))
-        self.post = Mock(return_value=self.stats)
+        self.queue = dict(queue=[])
+        self.post = Mock(return_value=self.queue)
 
     def snapshot(self, mounted=True):
         return upload.snapshot(self.connection, self.paths, {}, mounted, self.post)
@@ -47,23 +47,39 @@ class UploadTests(unittest.TestCase):
         item.symlink_to('/does-not-exist')
         self.assertEqual(self.snapshot()['state'], 'unknown')
 
-    def test_open_files_and_missing_stats_never_report_clear(self):
-        self.stats['inUse'] = 1
-        self.assertEqual(self.snapshot()['state'], 'unknown')
-        self.stats['inUse'] = 0
-        del self.stats['diskCache']['uploadsQueued']
-        self.assertEqual(self.snapshot()['state'], 'unknown')
+    def test_empty_queue_does_not_claim_open_apps_have_saved(self):
+        result = self.snapshot()
+        self.assertEqual(result['title'], 'No queued uploads')
+        self.assertIn('unsaved changes', result['message'])
+        self.post.assert_called_once_with({}, 'vfs/queue', {}, timeout=1, max_response_bytes=1024 * 1024)
+
+    def test_invalid_queue_is_unknown_not_empty(self):
+        for queue in (None, {}, [None], [{'id': 1, 'uploading': 'false', 'tries': 0}],
+                      [{'id': 1, 'uploading': False, 'tries': -1}]):
+            self.queue['queue'] = queue
+            self.assertEqual(self.snapshot()['state'], 'unknown')
 
     def test_bounded_scan_cannot_claim_completion(self):
         (self.root / 'file').write_text('{"Dirty":false}')
         self.assertEqual(upload.dirty_cache(self.connection, self.paths, limit=0), (0, False))
 
-    def test_queue_and_cache_errors_are_visible(self):
-        self.stats['diskCache']['uploadsQueued'] = 2
-        self.assertTrue(self.snapshot()['canRetry'])
-        self.assertEqual(self.snapshot()['state'], 'pending')
-        self.stats['diskCache']['erroredFiles'] = 1
+    def test_waiting_active_and_retried_uploads_are_distinguished(self):
+        self.queue['queue'] = [dict(id=1, uploading=False, tries=0), dict(id=2, uploading=True, tries=1)]
+        result = self.snapshot()
+        self.assertTrue(result['canRetry'])
+        self.assertEqual((result['queued'], result['active']), (1, 1))
+        self.assertEqual(result['state'], 'pending')
+        self.queue['queue'][0]['tries'] = 1
         self.assertEqual(self.snapshot()['state'], 'attention')
+
+    def test_stalled_directory_statistics_are_never_requested(self):
+        def local_control(live, method, payload, **kwargs):
+            if method == 'vfs/stats':
+                raise AssertionError('This endpoint locks the directory tree')
+            self.assertEqual(method, 'vfs/queue')
+            return {'queue': []}
+        self.post.side_effect = local_control
+        self.assertEqual(self.snapshot()['state'], 'clear')
 
     def test_disconnected_never_contacts_control_api(self):
         self.assertEqual(self.snapshot(False)['state'], 'unknown')
