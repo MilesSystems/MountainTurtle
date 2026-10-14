@@ -197,7 +197,7 @@ info = {
     "CFBundleIconFile": "AppIcon",
     "LSApplicationCategoryType": "public.app-category.utilities",
     "LSMinimumSystemVersion": "14.0",
-    "LSUIElement": False,
+    "LSUIElement": True,
     "NSHighResolutionCapable": True,
     "NSLocalNetworkUsageDescription": "Mountain Turtle connects to SFTP servers you choose on your local network and reads their storage capacity.",
     "NSNetworkVolumesUsageDescription": "Mountain Turtle accesses your connected drives to show them directly in Finder's sidebar.",
