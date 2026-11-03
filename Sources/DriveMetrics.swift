@@ -1032,3 +1032,73 @@ struct DriveMetricsView: View {
         } catch { if !Task.isCancelled { storageFailure = error.localizedDescription; storageLoading = false } }
     }
 }
+
+
+/// Filesystem capacity beside the selected drive, using the same SFTP-only
+/// statistics request as Drive insights (never a remote shell or folder scan).
+struct DriveHeaderStorage: View {
+    let connection: Connection
+    @State private var storage: DriveStorageSnapshot?
+    @State private var failure: String?
+    @State private var loading = true
+    @State private var requestID = UUID()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                card("Server capacity", value: storage?.totalBytes, symbol: "externaldrive", detail: "Total reported filesystem space")
+                card("Used on server", value: storage?.usedBytes, symbol: "chart.pie", detail: "Across the remote filesystem")
+                card("Free on server", value: storage?.freeBytes, symbol: "externaldrive.badge.plus", detail: "Available space reported by server")
+            }
+            HStack(spacing: 8) {
+                if loading { ProgressView().controlSize(.mini) }
+                Text(failure ?? storage?.message ?? (loading ? "Checking server storage…" : "Server filesystem · shared folders use the same capacity"))
+                    .font(.caption).foregroundStyle(failure == nil ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button { requestID = UUID() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain).disabled(loading).help("Refresh server capacity")
+                    .accessibilityLabel("Refresh server capacity")
+            }
+        }
+        .task(id: requestID) {
+            repeat {
+                await refresh()
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            } while !Task.isCancelled
+        }
+    }
+
+    private func card(_ title: String, value: Double?, symbol: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Image(systemName: symbol).foregroundStyle(moss)
+            }
+            Text(bytes(value)).font(.system(size: 24, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(ink).lineLimit(1).minimumScaleFactor(0.7)
+            Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white).clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(moss.opacity(0.1)))
+            .accessibilityElement(children: .combine)
+    }
+
+    private func bytes(_ value: Double?) -> String {
+        guard let value, value.isFinite, value >= 0, value < Double(Int64.max) else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary)
+    }
+
+    @MainActor private func refresh() async {
+        loading = true
+        do {
+            let result = try await MetricsClient.run(["storage", connection.id], as: DriveStorageSnapshot.self)
+            try Task.checkCancellation()
+            storage = result; failure = nil; loading = false
+        } catch {
+            guard !Task.isCancelled else { return }
+            storage = nil; failure = error.localizedDescription; loading = false
+        }
+    }
+}

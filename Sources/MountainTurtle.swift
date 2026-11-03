@@ -816,6 +816,7 @@ struct MainView: View {
                         Button("Remove connection…", role: .destructive) { removing = connection }.disabled(connection.isMounted || connection.desiredConnected || connection.isWorking)
                     } label: { Image(systemName: "ellipsis.circle").font(.system(size: 20)) }.menuStyle(.borderlessButton).frame(width: 25)
                 }
+                if connection.isSFTP { DriveHeaderStorage(connection: connection).id(connection.id) }
                 if let message = connection.message, !message.isEmpty {
                     notice(message, symbol: connection.state == "error" || connection.state == "needsLogin" ? "exclamationmark.circle" : "info.circle", color: connection.state == "error" || connection.state == "needsLogin" ? .orange : moss)
                 }
