@@ -714,7 +714,7 @@ class ServiceTests(unittest.TestCase):
              patch.object(turtle.threading, "Thread"), \
              patch.object(turtle, "LISTING_MONITORS", turtle.threading.BoundedSemaphore(8)), \
              patch.object(turtle, "remote_control_post", return_value={"finished": True}), \
-             patch.object(turtle.time, "monotonic", side_effect=[100, 105, 121]):
+             patch.object(turtle.time, "monotonic", side_effect=[100, 121, 401]):
             self.assertFalse(supervisor.request_folder_refresh({"path": folder})["throttled"])
             self.assertTrue(supervisor.request_folder_refresh({"path": folder})["throttled"])
             self.assertFalse(supervisor.request_folder_refresh({"path": folder})["throttled"])

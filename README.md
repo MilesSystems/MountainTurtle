@@ -340,7 +340,8 @@ metadata; badge checks do not scan remote storage or download photos.
 When a folder disclosure row is opened, Mountain Turtle can briefly show a
 loading badge on that folder while Finder asks for its visible children.
 Opening a folder also asks the mounted drive to refresh that folder's remote
-listing, so deletes or renames made elsewhere can appear without waiting for the
+listing, at most once every five minutes per folder, so deletes or renames made
+elsewhere can appear without waiting for the
 longer directory cache to expire. While the folder remains open, Mountain Turtle
 also prefetches that folder's direct files in the background so large folders
 become responsive as their contents enter the local cache. This opportunistic
@@ -506,6 +507,18 @@ a provider price or bill, and Mountain Turtle does not invent one.
 See [metrics details and pricing assumptions](docs/METRICS.md).
 
 ## Large photo libraries
+
+**Browse files** saves complete folder listings locally, showing cached entries
+immediately when a folder is reopened, including after an app restart. Listings
+less than 30 seconds old are reused without a remote request; older snapshots
+remain visible while a fresh listing streams in. A failed refresh keeps the last
+complete snapshot. **Refresh folder** always requests a new listing. This cache
+stores names, sizes, types and modification dates, not file contents; it is
+limited to 512 folders / 64 MiB overall, 8 MiB per folder, and seven days.
+Finder reuses its mounted directory cache and limits automatic refreshes of the
+same folder to once every five minutes. Other-client changes can therefore take
+up to that interval to appear; local filesystem mutations retain normal VFS
+cache updates.
 
 The **S3-only** photo browser works with an ordinary bucket directory tree.
 SFTP photos open through Finder. It does **not** make a

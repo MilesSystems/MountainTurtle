@@ -62,6 +62,18 @@ enum ServiceClient { static let resources = URL(fileURLWithPath: "/nonexistent")
         folder.children = []; folder.loaded = true
         model.revision += 1; coordinator.reload()
         precondition(coordinator.children(folder).isEmpty, "Empty completed folder retained its loading row")
+        folder.loading = true; folder.loaded = false
+        model.receive(FileTreePage(entries: [FileTreeEntry(name: "old", directory: false, size: 1, modified: 0)], cached: true), node: folder)
+        precondition(folder.showingCached && folder.children.count == 1 && folder.loading)
+        model.receive(FileTreePage(refreshing: true), node: folder)
+        model.receive(FileTreePage(error: "offline"), node: folder)
+        precondition(folder.children.first?.name == "old", "Failed refresh erased cached listing")
+        folder.loading = true
+        model.receive(FileTreePage(refreshing: true), node: folder)
+        model.receive(FileTreePage(entries: [FileTreeEntry(name: "new", directory: false, size: 2, modified: 0)]), node: folder)
+        precondition(folder.children.count == 2, "Partial refresh removed cached rows")
+        model.receive(FileTreePage(complete: true), node: folder)
+        precondition(folder.children.map(\.name) == ["new"] && !folder.showingCached, "Complete refresh retained deleted cached rows")
         print("PASS outline expansion, first page, cancellation and empty EOF")
     }
 }

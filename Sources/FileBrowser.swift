@@ -14,6 +14,8 @@ private struct FileTreePage: Decodable {
     var entries: [FileTreeEntry]?
     var complete: Bool?
     var error: String?
+    var cached: Bool?
+    var refreshing: Bool?
 }
 
 private final class FileTreeRequest: @unchecked Sendable {
@@ -53,6 +55,8 @@ private final class FileTreeRequest: @unchecked Sendable {
     var modified: Double
     weak var parent: FileTreeNode?
     var children: [FileTreeNode] = []
+    var lastLoaded: Date?
+    var showingCached = false
     var loaded = false
     var loading = false
     var error: String?
@@ -85,7 +89,8 @@ private final class FileTreeRequest: @unchecked Sendable {
     var status: String {
         let node = folder
         if let error = node.error { return "\(node.children.count.formatted()) items shown · \(error)" }
-        if node.loading { return "\(node.children.count.formatted()) items shown · Loading…" }
+        if node.loading { return "\(node.children.count.formatted()) items shown · \(node.showingCached ? "Cached · refreshing…" : "Loading…")" }
+        if node.showingCached { return "\(node.children.count.formatted()) items · Cached" }
         return "\(node.children.count.formatted()) items"
     }
     func changed() {
@@ -97,8 +102,11 @@ private final class FileTreeRequest: @unchecked Sendable {
             self.revision += 1
         }
     }
-    func load(_ node: FileTreeNode) {
-        guard node.directory, !node.loaded, !node.loading else { return }
+    func load(_ node: FileTreeNode, refresh: Bool = false) {
+        guard node.directory, !node.loading else { return }
+        if !refresh, node.loaded, let lastLoaded = node.lastLoaded,
+           Date().timeIntervalSince(lastLoaded) < 30 { return }
+        if node.loaded { node.showingCached = true }
         let request = FileTreeRequest(), generation = UUID()
         node.request = request; node.generation = generation
         node.loading = true; node.error = nil; node.received = []
@@ -110,7 +118,7 @@ private final class FileTreeRequest: @unchecked Sendable {
                 guard let python else { throw TurtleError(message: "Python is unavailable.") }
                 let process = Process(), output = Pipe()
                 process.executableURL = URL(fileURLWithPath: python)
-                process.arguments = ["-B", resources + "/service/file_browser.py", "--resource-dir", resources, connectionID, key]
+                process.arguments = ["-B", resources + "/service/file_browser.py", "--resource-dir", resources, connectionID, key] + (refresh ? ["--refresh"] : [])
                 process.standardOutput = output
                 process.standardError = FileHandle.nullDevice
                 try request.start(process)
@@ -148,7 +156,9 @@ private final class FileTreeRequest: @unchecked Sendable {
             }
         }
     }
-    private func receive(_ page: FileTreePage, node: FileTreeNode) {
+    fileprivate func receive(_ page: FileTreePage, node: FileTreeNode) {
+        if page.cached == true { node.showingCached = true }
+        if page.refreshing == true { node.received = [] }
         var existing = Dictionary(node.children.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         for entry in page.entries ?? [] {
             guard !entry.name.isEmpty, entry.name != ".", entry.name != "..", !entry.name.contains("/"), !entry.name.contains("\0") else { continue }
@@ -165,8 +175,10 @@ private final class FileTreeRequest: @unchecked Sendable {
         }
         node.children.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         if page.complete == true {
+            node.showingCached = page.cached == true
             for child in node.children where !node.received.contains(child.name) { cancel(child) }
             node.children.removeAll { !node.received.contains($0.name) }
+            node.lastLoaded = Date()
             node.loaded = true; node.loading = false; node.request = nil
         }
         if let error = page.error { node.error = error; node.loading = false; node.request = nil }
@@ -180,7 +192,7 @@ private final class FileTreeRequest: @unchecked Sendable {
     }
     func refresh() {
         let node = folder
-        cancel(node); node.loaded = false; load(node)
+        cancel(node); node.loaded = false; load(node, refresh: true)
     }
     func openSelected() {
         guard let selected, !selected.directory else { return }

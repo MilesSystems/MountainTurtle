@@ -161,7 +161,7 @@ final class MountainTurtleFinderSync: FIFinderSync {
     private var folderActions: [Int: FolderCacheAction] = [:]
     private var nextActionTag = 1
     private let folderLoadingDuration: TimeInterval = 6
-    private let folderRemoteRefreshInterval: TimeInterval = 20
+    private let folderRemoteRefreshInterval: TimeInterval = 300
 
     override init() {
         super.init()

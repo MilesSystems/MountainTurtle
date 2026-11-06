@@ -39,7 +39,7 @@ EVENT_QUEUE_LIMIT = 100
 EVENT_QUEUE_DISPLAY_LIMIT = 8
 EVENT_AGGREGATE_SECONDS = 30
 EVENT_LOG_READ_LIMIT = 512 * 1024
-FOLDER_REFRESH_MIN_SECONDS = 20
+FOLDER_REFRESH_MIN_SECONDS = 300
 OPEN_FOLDER_PREFETCH_MIN_SECONDS = 90
 OPEN_FOLDER_PREFETCH_QUEUE_LIMIT = 32
 OPEN_FOLDER_PREFETCH_CACHE_FRACTION = 0.92
@@ -1680,8 +1680,8 @@ class Supervisor:
             return {"ok": False, "message": "Connect this drive before refreshing this folder."}
         now = time.monotonic()
         key = (connection["id"], relative)
-        previous = self.folder_refreshes.get(key, 0)
-        if now - previous < FOLDER_REFRESH_MIN_SECONDS:
+        previous = self.folder_refreshes.get(key)
+        if previous is not None and now - previous < FOLDER_REFRESH_MIN_SECONDS:
             return {"ok": True, "connectionID": connection["id"], "relativePath": relative, "throttled": True}
         self.folder_refreshes[key] = now
         if len(self.folder_refreshes) > 512:
