@@ -2324,6 +2324,28 @@ def resume_update(paths):
         return resume_update_locked(paths)
 
 
+def recover_interrupted_update(paths):
+    """Retry interrupted recovery, never an install still preparing/prepared."""
+    try:
+        marker = update_marker(Store(paths).read())
+    except RuntimeError:
+        return  # Preserve invalid recovery data; connection mutations stay gated.
+    if marker is None or marker["phase"] != "resuming":
+        return
+    with (paths.base / "update.lock").open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # An installer or another recovery still owns this handoff.
+        marker = update_marker(Store(paths).read())
+        if marker is not None and marker["phase"] == "resuming":
+            try:
+                resume_update_locked(paths)
+            except RuntimeError:
+                # Keep the marker and saved choices for the next refresh.
+                logging.exception("Update recovery will retry on the next refresh")
+
+
 def prepare_update(paths, timeout=90):
     """Wait for the supervisor's normal safe eject, preserving cache and intent."""
     if not 5 <= timeout <= 180:
@@ -2516,6 +2538,8 @@ def parser():
 
 
 def action(args, paths):
+    if args.command == "import-setup":
+        recover_interrupted_update(paths)
     if args.command in ("export-setup", "inspect-setup", "import-setup"):
         import setup_bundle
         if args.command in ("inspect-setup", "import-setup"):
@@ -2543,6 +2567,8 @@ def action(args, paths):
         connection = find_connection(Store(paths).read(), args.id)
         # Export stdout is the portable document itself, without a CLI envelope.
         return json.loads(connection_transfer.encode(connection))
+    if args.command not in ("serve", "prepare-update", "resume-update"):
+        recover_interrupted_update(paths)
     store = Store(paths)
     if args.command == "status":
         return status(paths)

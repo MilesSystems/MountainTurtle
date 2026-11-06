@@ -51,6 +51,24 @@ import SwiftUI
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         availableVersion = nil
+        recoverAfterUpdateCycle()
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        installationPending = false
+        recoverAfterUpdateCycle()
+    }
+
+    private func recoverAfterUpdateCycle() {
+        guard !installationPending, !preparingToQuit, ServiceClient.pythonPath != nil else { return }
+        Task {
+            do {
+                try await runServiceCommand("resume-update")
+                await AppModel.shared.refresh()
+            } catch {
+                AppModel.shared.error = error.localizedDescription
+            }
+        }
     }
 
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {

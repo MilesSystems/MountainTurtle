@@ -90,6 +90,59 @@ class UpdateLifecycleTests(unittest.TestCase):
         self.assertEqual([c["desiredConnected"] for c in state["connections"][:2]], [True, False])
         return state
 
+    def test_refresh_recovers_interrupted_resume(self):
+        self.handoff("resuming")
+        turtle.recover_interrupted_update(self.paths)
+        state = self.assert_intent_restored()
+        self.assertNotIn("updateHandoff", state)
+        turtle.assert_no_update(state)
+
+    def test_connection_action_recovers_before_mutating(self):
+        self.handoff("resuming")
+        args = turtle.parser().parse_args(["disconnect", "manual"])
+        result = turtle.action(args, self.paths)
+        self.assertTrue(result["ok"])
+        state = self.store.read()
+        self.assertNotIn("updateHandoff", state)
+        self.assertFalse(state["connections"][0]["desiredConnected"])
+        self.assertFalse(state["connections"][1]["desiredConnected"])
+
+    def test_invalid_marker_is_preserved_and_mutations_remain_blocked(self):
+        with self.store.update() as state:
+            state["updateHandoff"] = {"phase": "resuming"}
+        before = self.store.read()
+        turtle.recover_interrupted_update(self.paths)
+        self.assertEqual(self.store.read(), before)
+        with self.assertRaisesRegex(RuntimeError, "update is in progress"):
+            turtle.assert_no_update(self.store.read())
+        self.ensure.assert_not_called()
+
+    def test_refresh_preserves_pending_install(self):
+        for phase in ("preparing", "prepared"):
+            self.handoff(phase)
+            before = self.store.read()
+            turtle.recover_interrupted_update(self.paths)
+            self.assertEqual(self.store.read(), before)
+        self.ensure.assert_not_called()
+
+    def test_refresh_does_not_race_update_owner(self):
+        self.handoff("resuming")
+        before = self.store.read()
+        with turtle.update_handoff_lock(self.paths):
+            turtle.recover_interrupted_update(self.paths)
+        self.assertEqual(self.store.read(), before)
+        self.ensure.assert_not_called()
+
+    def test_refresh_retries_failed_service_recovery(self):
+        self.handoff("resuming")
+        self.on_ensure = lambda: (_ for _ in ()).throw(RuntimeError("not ready"))
+        with self.assertLogs(level="ERROR"):
+            turtle.recover_interrupted_update(self.paths)
+        self.assertIn("updateHandoff", self.store.read())
+        self.on_ensure = None
+        turtle.recover_interrupted_update(self.paths)
+        self.assertNotIn("updateHandoff", self.assert_intent_restored())
+
     def test_resume_without_marker_is_a_no_op(self):
         before = self.store.read()
         self.assertEqual(turtle.resume_update(self.paths), {"ok": True, "resumed": False})
